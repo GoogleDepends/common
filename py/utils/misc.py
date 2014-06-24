@@ -3,12 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-""" This module contains miscellaneous tools used by the buildbot scripts. """
+""" This module contains miscellaneous tools. """
 
 import os
-
-from git_utils import GIT
-import shell_utils
 
 
 # Absolute path to the root of this Skia buildbot checkout.
@@ -93,50 +90,3 @@ class ChDir(object):
     if self._verbose:
       print 'chdir %s' % self._origin
     os.chdir(self._origin)
-
-
-class GitBranch(object):
-  """Class to manage git branches.
-
-  This class allows one to create a new branch in a repository to make changes,
-  then it commits the changes, switches to master branch, and deletes the
-  created temporary branch upon exit.
-  """
-  def __init__(self, branch_name, commit_msg, upload=True, commit_queue=False):
-    self._branch_name = branch_name
-    self._commit_msg = commit_msg
-    self._upload = upload
-    self._commit_queue = commit_queue
-    self._patch_set = 0
-
-  def __enter__(self):
-    shell_utils.run([GIT, 'reset', '--hard', 'HEAD'])
-    shell_utils.run([GIT, 'checkout', 'master'])
-    if self._branch_name in shell_utils.run([GIT, 'branch']):
-      shell_utils.run([GIT, 'branch', '-D', self._branch_name])
-    shell_utils.run([GIT, 'checkout', '-b', self._branch_name,
-                     '-t', 'origin/master'])
-    return self
-
-  def commit_and_upload(self, use_commit_queue=False):
-    shell_utils.run([GIT, 'commit', '-a', '-m',
-                     self._commit_msg])
-    upload_cmd = [GIT, 'cl', 'upload', '-f', '--bypass-hooks',
-                  '--bypass-watchlists']
-    self._patch_set += 1
-    if self._patch_set > 1:
-      upload_cmd.extend(['-t', 'Patch set %d' % self._patch_set])
-    if use_commit_queue:
-      upload_cmd.append('--use-commit-queue')
-    shell_utils.run(upload_cmd)
-
-  def __exit__(self, exc_type, _value, _traceback):
-    if self._upload:
-      # Only upload if no error occurred.
-      try:
-        if exc_type is None:
-          self.commit_and_upload(use_commit_queue=self._commit_queue)
-      finally:
-        shell_utils.run([GIT, 'checkout', 'master'])
-        shell_utils.run([GIT, 'branch', '-D', self._branch_name])
-

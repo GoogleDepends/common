@@ -20,6 +20,7 @@ if 'nt' in os.name:
 
 DEFAULT_SECS_BETWEEN_ATTEMPTS = 10
 POLL_MILLIS = 250
+VERBOSE = True
 
 
 class CommandFailedException(Exception):
@@ -46,9 +47,11 @@ class TimeoutException(CommandFailedException):
   pass
 
 
-def run_async(cmd, echo=True, shell=False):
+def run_async(cmd, echo=None, shell=False):
   """ Run 'cmd' in a subprocess, returning a Popen class instance referring to
   that process.  (Non-blocking) """
+  if echo is None:
+    echo = VERBOSE
   if echo:
     print cmd
   if 'nt' in os.name:
@@ -99,7 +102,7 @@ class EnqueueThread(threading.Thread):
     self._stopped = True
 
 
-def log_process_in_real_time(proc, echo=True, timeout=None, log_file=None,
+def log_process_in_real_time(proc, echo=None, timeout=None, log_file=None,
                              halt_on_output=None, print_timestamps=True):
   """ Log the output of proc in real time until it completes. Return a tuple
   containing the exit code of proc and the contents of stdout.
@@ -114,6 +117,8 @@ def log_process_in_real_time(proc, echo=True, timeout=None, log_file=None,
   print_timestamps: boolean indicating whether a formatted timestamp should be
       prepended to each line of output.
   """
+  if echo is None:
+    echo = VERBOSE
   stdout_queue = Queue.Queue()
   log_thread = EnqueueThread(proc.stdout, stdout_queue)
   log_thread.start()
@@ -153,7 +158,8 @@ def log_process_in_real_time(proc, echo=True, timeout=None, log_file=None,
   return (code, ''.join(all_output))
 
 
-def log_process_after_completion(proc, echo=True, timeout=None, log_file=None):
+def log_process_after_completion(proc, echo=None, timeout=None,
+                                 log_file=None):
   """ Wait for proc to complete and return a tuple containing the exit code of
   proc and the contents of stdout. Unlike log_process_in_real_time, does not
   attempt to read stdout from proc in real time.
@@ -164,6 +170,8 @@ def log_process_after_completion(proc, echo=True, timeout=None, log_file=None):
       TimeoutException if the run time exceeds the timeout.
   log_file: an open file for writing outout
   """
+  if echo is None:
+    echo = VERBOSE
   t_0 = time.time()
   code = None
   while code is None:
@@ -182,7 +190,7 @@ def log_process_after_completion(proc, echo=True, timeout=None, log_file=None):
   return (code, output)
 
 
-def run(cmd, echo=True, shell=False, timeout=None, print_timestamps=True,
+def run(cmd, echo=None, shell=False, timeout=None, print_timestamps=True,
         log_in_real_time=True):
   """ Run 'cmd' in a shell and return the combined contents of stdout and
   stderr (Blocking).  Throws an exception if the command exits non-zero.
@@ -202,6 +210,8 @@ def run(cmd, echo=True, shell=False, timeout=None, print_timestamps=True,
       subprocess in real time instead of when the process finishes. If echo is
       False, we never log in real time, even if log_in_real_time is True.
   """
+  if echo is None:
+    echo = VERBOSE
   proc = run_async(cmd, echo=echo, shell=shell)
   # If we're not printing the output, we don't care if the output shows up in
   # real time, so don't bother.
@@ -218,11 +228,13 @@ def run(cmd, echo=True, shell=False, timeout=None, print_timestamps=True,
   return output
 
 
-def run_retry(cmd, echo=True, shell=False, attempts=1,
+def run_retry(cmd, echo=None, shell=False, attempts=1,
               secs_between_attempts=DEFAULT_SECS_BETWEEN_ATTEMPTS,
               timeout=None, print_timestamps=True):
   """ Wrapper for run() which makes multiple attempts until either the command
   succeeds or the maximum number of attempts is reached. """
+  if echo is None:
+    echo = VERBOSE
   attempt = 1
   while True:
     try:
