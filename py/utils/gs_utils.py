@@ -7,10 +7,12 @@ Copyright 2014 Google Inc.
 Use of this source code is governed by a BSD-style license that can be
 found in the LICENSE file.
 
-Utilities for accessing Google Cloud Storage, using the boto library.
+Utilities for accessing Google Cloud Storage, using the boto library (wrapper
+for the XML API).
 
-See http://googlecloudstorage.blogspot.com/2012/09/google-cloud-storage-tutorial-using-boto.html
-for implementation tips.
+API/library references:
+- https://developers.google.com/storage/docs/reference-guide
+- http://googlecloudstorage.blogspot.com/2012/09/google-cloud-storage-tutorial-using-boto.html
 """
 # pylint: enable=C0301
 
@@ -34,10 +36,35 @@ for import_subdir in ['boto']:
     # We need to insert at the beginning of the path, to make sure that our
     # imported versions are favored over others that might be in the path.
     sys.path.insert(0, import_dirpath)
+from boto.gs import acl
 from boto.gs.connection import GSConnection
 from boto.gs.key import Key
 from boto.s3.bucketlistresultset import BucketListResultSet
 from boto.s3.prefix import Prefix
+
+# Permissions that may be set on each file in Google Storage.
+# See SupportedPermissions in
+# https://github.com/boto/boto/blob/develop/boto/gs/acl.py
+PERMISSION_NONE  = None
+PERMISSION_OWNER = 'FULL_CONTROL'
+PERMISSION_READ  = 'READ'
+PERMISSION_WRITE = 'WRITE'
+
+# Types of identifiers we can use to set ACLs.
+ID_TYPE_GROUP_BY_DOMAIN = acl.GROUP_BY_DOMAIN
+ID_TYPE_GROUP_BY_EMAIL = acl.GROUP_BY_EMAIL
+ID_TYPE_GROUP_BY_ID = acl.GROUP_BY_ID
+ID_TYPE_USER_BY_EMAIL = acl.USER_BY_EMAIL
+ID_TYPE_USER_BY_ID = acl.USER_BY_ID
+
+# Which field we get/set in ACL entries, depending on ID_TYPE.
+FIELD_BY_ID_TYPE = {
+    ID_TYPE_GROUP_BY_DOMAIN: 'domain',
+    ID_TYPE_GROUP_BY_EMAIL: 'email_address',
+    ID_TYPE_GROUP_BY_ID: 'id',
+    ID_TYPE_USER_BY_EMAIL: 'email_address',
+    ID_TYPE_USER_BY_ID: 'id',
+}
 
 
 class GSUtils(object):
@@ -112,6 +139,96 @@ class GSUtils(object):
       _makedirs_if_needed(os.path.dirname(dest_path))
     with open(dest_path, 'w') as f:
       item.get_contents_to_file(fp=f)
+
+  def get_acl(self, bucket, path, id_type, id_value):
+    """Retrieve partial access permissions on a single file in Google Storage.
+
+    Various users who match this id_type/id_value pair may have access rights
+    other than that returned by this call, if they have been granted those
+    rights based on *other* id_types (e.g., perhaps they have group access
+    rights, beyond their individual access rights).
+
+    Params:
+      bucket: GS bucket
+      path: full path (Posix-style) to the file within that bucket
+      id_type: must be one of the ID_TYPE_* constants defined above
+      id_value: get permissions for users whose id_type field contains this
+          value
+
+    Returns: the PERMISSION_* constant which has been set for users matching
+        this id_type/id_value, on this file; or PERMISSION_NONE if no such
+        permissions have been set.
+    """
+    field = FIELD_BY_ID_TYPE[id_type]
+    conn = self._create_connection()
+    b = conn.get_bucket(bucket_name=bucket)
+    acls = b.get_acl(key_name=path)
+    matching_entries = [entry for entry in acls.entries.entry_list
+                        if (entry.scope.type == id_type) and
+                        (getattr(entry.scope, field) == id_value)]
+    if matching_entries:
+      assert len(matching_entries) == 1, '%d == 1' % len(matching_entries)
+      return matching_entries[0].permission
+    else:
+      return PERMISSION_NONE
+
+  def set_acl(self, bucket, path, id_type, id_value, permission):
+    """Set partial access permissions on a single file in Google Storage.
+
+    Note that a single set_acl() call will not guarantee what access rights any
+    given user will have on a given file, because permissions are additive.
+    (E.g., if you set READ permission for a group, but a member of that group
+    already has WRITE permission, that member will still have WRITE permission.)
+    TODO(epoger): Do we know that for sure?  I *think* that's how it works...
+
+    If there is already a permission set on this file for this id_type/id_value
+    combination, this call will overwrite it.
+
+    Params:
+      bucket: GS bucket
+      path: full path (Posix-style) to the file within that bucket
+      id_type: must be one of the ID_TYPE_* constants defined above
+      id_value: add permission for users whose id_type field contains this value
+      permission: permission to add for users matching id_type/id_value;
+          must be one of the PERMISSION_* constants defined above.
+          If PERMISSION_NONE, then any permissions will be granted to this
+          particular id_type/id_value will be removed... but, given that
+          permissions are additive, specific users may still have access rights
+          based on permissions given to *other* id_type/id_value pairs.
+
+    Example Code:
+      bucket = 'gs://bucket-name'
+      path = 'path/to/file'
+      id_type = ID_TYPE_USER_BY_EMAIL
+      id_value = 'epoger@google.com'
+      set_acl(bucket, path, id_type, id_value, PERMISSION_READ)
+      assert PERMISSION_READ == get_acl(bucket, path, id_type, id_value)
+      set_acl(bucket, path, id_type, id_value, PERMISSION_WRITE)
+      assert PERMISSION_WRITE == get_acl(bucket, path, id_type, id_value)
+    """
+    field = FIELD_BY_ID_TYPE[id_type]
+    conn = self._create_connection()
+    b = conn.get_bucket(bucket_name=bucket)
+    acls = b.get_acl(key_name=path)
+
+    # Remove any existing entries that refer to the same id_type/id_value,
+    # because the API will fail if we try to set more than one.
+    matching_entries = [entry for entry in acls.entries.entry_list
+                        if (entry.scope.type == id_type) and
+                        (getattr(entry.scope, field) == id_value)]
+    if matching_entries:
+      assert len(matching_entries) == 1, '%d == 1' % len(matching_entries)
+      acls.entries.entry_list.remove(matching_entries[0])
+
+    # Add a new entry to the ACLs.
+    if permission != PERMISSION_NONE:
+      args = {'type': id_type, 'permission': permission}
+      args[field] = id_value
+      new_entry = acl.Entry(**args)
+      acls.entries.entry_list.append(new_entry)
+
+    # Finally, write back the modified ACLs.
+    b.set_acl(acl_or_str=acls, key_name=path)
 
   def list_bucket_contents(self, bucket, subdir=None):
     """Returns files in the Google Storage bucket as a (dirs, files) tuple.
@@ -213,6 +330,41 @@ def _run_self_test():
       bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
   assert dirs == [], '%s == []' % dirs
   assert files == filenames_to_upload, '%s == %s' % (files, filenames_to_upload)
+
+  # Manipulate ACLs on one of those files, and verify them.
+  # TODO(epoger): Test id_types other than ID_TYPE_GROUP_BY_DOMAIN ?
+  # TODO(epoger): Test setting multiple ACLs on the same file?
+  id_type = ID_TYPE_GROUP_BY_DOMAIN
+  id_value = 'google.com'
+  fullpath = posixpath.join(remote_dir, subdir, filenames_to_upload[0])
+  # Make sure ACL is empty to start with ...
+  gs.set_acl(bucket=bucket, path=fullpath,
+             id_type=id_type, id_value=id_value, permission=PERMISSION_NONE)
+  permission = gs.get_acl(bucket=bucket, path=fullpath,
+                          id_type=id_type, id_value=id_value)
+  assert permission == PERMISSION_NONE, '%s == %s' % (
+      permission, PERMISSION_NONE)
+  # ... set it to OWNER ...
+  gs.set_acl(bucket=bucket, path=fullpath,
+             id_type=id_type, id_value=id_value, permission=PERMISSION_OWNER)
+  permission = gs.get_acl(bucket=bucket, path=fullpath,
+                          id_type=id_type, id_value=id_value)
+  assert permission == PERMISSION_OWNER, '%s == %s' % (
+      permission, PERMISSION_OWNER)
+  # ... now set it to READ ...
+  gs.set_acl(bucket=bucket, path=fullpath,
+             id_type=id_type, id_value=id_value, permission=PERMISSION_READ)
+  permission = gs.get_acl(bucket=bucket, path=fullpath,
+                          id_type=id_type, id_value=id_value)
+  assert permission == PERMISSION_READ, '%s == %s' % (
+      permission, PERMISSION_READ)
+  # ... and clear it again to finish.
+  gs.set_acl(bucket=bucket, path=fullpath,
+             id_type=id_type, id_value=id_value, permission=PERMISSION_NONE)
+  permission = gs.get_acl(bucket=bucket, path=fullpath,
+                          id_type=id_type, id_value=id_value)
+  assert permission == PERMISSION_NONE, '%s == %s' % (
+      permission, PERMISSION_NONE)
 
   # Download the files we uploaded to Google Storage, and validate contents.
   local_dest_dir = tempfile.mkdtemp()
