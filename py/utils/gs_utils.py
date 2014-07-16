@@ -37,9 +37,11 @@ for import_subdir in ['boto']:
     # imported versions are favored over others that might be in the path.
     sys.path.insert(0, import_dirpath)
 from boto.gs import acl
+from boto.gs.bucket import Bucket
 from boto.gs.connection import GSConnection
 from boto.gs.key import Key
 from boto.s3.bucketlistresultset import BucketListResultSet
+from boto.s3.connection import SubdomainCallingFormat
 from boto.s3.prefix import Prefix
 
 # Permissions that may be set on each file in Google Storage.
@@ -67,24 +69,46 @@ FIELD_BY_ID_TYPE = {
 }
 
 
+class AnonymousGSConnection(GSConnection):
+  """GSConnection class that allows anonymous connections.
+
+  The GSConnection class constructor in
+  https://github.com/boto/boto/blob/develop/boto/gs/connection.py doesn't allow
+  for anonymous connections (connections without credentials), so we have to
+  override it.
+  """
+  def __init__(self):
+    super(GSConnection, self).__init__(
+        # This is the important bit we need to add...
+        anon=True,
+        # ...and these are just copied in from GSConnection.__init__()
+        bucket_class=Bucket,
+        calling_format=SubdomainCallingFormat(),
+        host=GSConnection.DefaultHost,
+        provider='google')
+
+
 class GSUtils(object):
   """Utilities for accessing Google Cloud Storage, using the boto library."""
 
-  def __init__(self, boto_file_path=os.path.join('~','.boto')):
+  def __init__(self, boto_file_path=None):
     """Constructor.
 
     Params:
       boto_file_path: full path (local-OS-style) on local disk where .boto
-          credentials file can be found.  An exception is thrown if this file
-          is missing.
-          TODO(epoger): Change missing-file behavior: allow the caller to
-          operate on public files in Google Storage.
+          credentials file can be found.  If None, then the GSUtils object
+          created will be able to access only public files in Google Storage.
+
+    Raises an exception if no file is found at boto_file_path, or if the file
+    found there is malformed.
     """
-    boto_file_path = os.path.expanduser(boto_file_path)
-    print 'Reading boto file from %s' % boto_file_path
-    boto_dict = _config_file_as_dict(filepath=boto_file_path)
-    self._gs_access_key_id = boto_dict['gs_access_key_id']
-    self._gs_secret_access_key = boto_dict['gs_secret_access_key']
+    self._gs_access_key_id = None
+    self._gs_secret_access_key = None
+    if boto_file_path:
+      print 'Reading boto file from %s' % boto_file_path
+      boto_dict = _config_file_as_dict(filepath=boto_file_path)
+      self._gs_access_key_id = boto_dict['gs_access_key_id']
+      self._gs_secret_access_key = boto_dict['gs_secret_access_key']
 
   def delete_file(self, bucket, path):
     """Delete a single file within a GS bucket.
@@ -258,10 +282,12 @@ class GSUtils(object):
 
   def _create_connection(self):
     """Returns a GSConnection object we can use to access Google Storage."""
-    return GSConnection(
-        gs_access_key_id=self._gs_access_key_id,
-        gs_secret_access_key=self._gs_secret_access_key)
-
+    if self._gs_access_key_id:
+      return GSConnection(
+          gs_access_key_id=self._gs_access_key_id,
+          gs_secret_access_key=self._gs_secret_access_key)
+    else:
+      return AnonymousGSConnection()
 
 def _config_file_as_dict(filepath):
   """Reads a boto-style config file into a dict.
@@ -301,12 +327,27 @@ def _makedirs_if_needed(path):
       raise
 
 
-def _run_self_test():
+def _test_public_read():
+  """Make sure we can read from public files without .boto file credentials."""
+  gs = GSUtils()
+  gs.list_bucket_contents(bucket='chromium-skia-gm-summaries', subdir=None)
+
+
+def _test_authenticated_round_trip():
+  try:
+    gs = GSUtils(boto_file_path=os.path.expanduser(os.path.join('~','.boto')))
+  except:
+    print """
+Failed to instantiate GSUtils object with default .boto file path.
+Do you have a ~/.boto file that provides the credentials needed to read
+and write gs://chromium-skia-gm ?
+"""
+    raise
+
   bucket = 'chromium-skia-gm'
   remote_dir = 'gs_utils_test/%d' % random.randint(0, sys.maxint)
   subdir = 'subdir'
   filenames_to_upload = ['file1', 'file2']
-  gs = GSUtils()
 
   # Upload test files to Google Storage.
   local_src_dir = tempfile.mkdtemp()
@@ -393,11 +434,10 @@ def _run_self_test():
   assert files == [], '%s == []' % files
 
 
-# TODO(epoger): How should we exercise this self-test?
-# I avoided using the standard unittest framework, because these Google Storage
-# operations are expensive and require .boto permissions.
-#
-# How can we automatically test this code without wasting too many resources
-# or needing .boto permissions?
+# TODO(epoger): How should we exercise these self-tests?
+# See http://skbug.com/2751
 if __name__ == '__main__':
-  _run_self_test()
+  _test_public_read()
+  _test_authenticated_round_trip()
+  # TODO(epoger): Add _test_unauthenticated_access() to make sure we raise
+  # an exception when we try to access without needed credentials.
