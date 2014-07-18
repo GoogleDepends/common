@@ -36,6 +36,7 @@ for import_subdir in ['boto']:
     # We need to insert at the beginning of the path, to make sure that our
     # imported versions are favored over others that might be in the path.
     sys.path.insert(0, import_dirpath)
+from boto.exception import BotoServerError
 from boto.gs import acl
 from boto.gs.bucket import Bucket
 from boto.gs.connection import GSConnection
@@ -44,20 +45,33 @@ from boto.s3.bucketlistresultset import BucketListResultSet
 from boto.s3.connection import SubdomainCallingFormat
 from boto.s3.prefix import Prefix
 
-# Permissions that may be set on each file in Google Storage.
-# See SupportedPermissions in
+# Predefined (aka "canned") ACLs that provide a "base coat" of permissions for
+# each file in Google Storage.  See CannedACLStrings in
 # https://github.com/boto/boto/blob/develop/boto/gs/acl.py
+# Also see https://developers.google.com/storage/docs/accesscontrol
+PREDEFINED_ACL_AUTHENTICATED_READ        = 'authenticated-read'
+PREDEFINED_ACL_BUCKET_OWNER_FULL_CONTROL = 'bucket-owner-full-control'
+PREDEFINED_ACL_BUCKET_OWNER_READ         = 'bucket-owner-read'
+PREDEFINED_ACL_PRIVATE                   = 'private'
+PREDEFINED_ACL_PROJECT_PRIVATE           = 'project-private'
+PREDEFINED_ACL_PUBLIC_READ               = 'public-read'
+PREDEFINED_ACL_PUBLIC_READ_WRITE         = 'public-read-write'
+
+# "Fine-grained" permissions that may be set per user/group on each file in
+# Google Storage.  See SupportedPermissions in
+# https://github.com/boto/boto/blob/develop/boto/gs/acl.py
+# Also see https://developers.google.com/storage/docs/accesscontrol
 PERMISSION_NONE  = None
 PERMISSION_OWNER = 'FULL_CONTROL'
 PERMISSION_READ  = 'READ'
 PERMISSION_WRITE = 'WRITE'
 
-# Types of identifiers we can use to set ACLs.
+# Types of identifiers we can use to set "fine-grained" ACLs.
 ID_TYPE_GROUP_BY_DOMAIN = acl.GROUP_BY_DOMAIN
-ID_TYPE_GROUP_BY_EMAIL = acl.GROUP_BY_EMAIL
-ID_TYPE_GROUP_BY_ID = acl.GROUP_BY_ID
-ID_TYPE_USER_BY_EMAIL = acl.USER_BY_EMAIL
-ID_TYPE_USER_BY_ID = acl.USER_BY_ID
+ID_TYPE_GROUP_BY_EMAIL  = acl.GROUP_BY_EMAIL
+ID_TYPE_GROUP_BY_ID     = acl.GROUP_BY_ID
+ID_TYPE_USER_BY_EMAIL   = acl.USER_BY_EMAIL
+ID_TYPE_USER_BY_ID      = acl.USER_BY_ID
 
 # Which field we get/set in ACL entries, depending on ID_TYPE.
 FIELD_BY_ID_TYPE = {
@@ -120,16 +134,21 @@ class GSUtils(object):
       bucket: GS bucket to delete a file from
       path: full path (Posix-style) of the file within the bucket to delete
     """
-    conn = self._create_connection()
-    b = conn.get_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket_name=bucket)
     item = Key(b)
     item.key = path
-    item.delete()
+    try:
+      item.delete()
+    except BotoServerError, e:
+      e.body = (repr(e.body) +
+                ' while deleting bucket=%s, path=%s' % (bucket, path))
+      raise
 
-  def upload_file(self, source_path, dest_bucket, dest_path):
+  def upload_file(self, source_path, dest_bucket, dest_path,
+                  predefined_acl=None, fine_grained_acl_list=None):
     """Upload contents of a local file to Google Storage.
 
-    TODO(epoger): Add the extra parameters provided by upload_file() within
+    TODO(epoger): Add the only_if_modified param provided by upload_file() in
     https://github.com/google/skia-buildbot/blob/master/slave/skia_slave_scripts/utils/old_gs_utils.py ,
     so we can replace that function with this one.
 
@@ -137,12 +156,96 @@ class GSUtils(object):
       source_path: full path (local-OS-style) on local disk to read from
       dest_bucket: GCS bucket to copy the file to
       dest_path: full path (Posix-style) within that bucket
+      predefined_acl: which predefined ACL to apply to the file on Google
+          Storage; must be one of the PREDEFINED_ACL_* constants defined above.
+          If None, inherits dest_bucket's default object ACL.
+          TODO(epoger): add unittests for this param, although it seems to work
+          in my manual testing
+      fine_grained_acl_list: list of (id_type, id_value, permission) tuples
+          to apply to the uploaded file (on top of the predefined_acl),
+          or None if predefined_acl is sufficient
     """
-    conn = self._create_connection()
-    b = conn.get_bucket(bucket_name=dest_bucket)
+    b = self._connect_to_bucket(bucket_name=dest_bucket)
     item = Key(b)
     item.key = dest_path
-    item.set_contents_from_filename(filename=source_path)
+    try:
+      item.set_contents_from_filename(filename=source_path,
+                                      policy=predefined_acl)
+    except BotoServerError, e:
+      e.body = (repr(e.body) +
+                ' while uploading source_path=%s to bucket=%s, path=%s' % (
+                    source_path, dest_bucket, item.key))
+      raise
+    # TODO(epoger): This may be inefficient, because it calls
+    # _connect_to_bucket() again.  Depending on how expensive that
+    # call is, we may want to optimize this.
+    for (id_type, id_value, permission) in fine_grained_acl_list or []:
+      self.set_acl(
+          bucket=dest_bucket, path=item.key,
+          id_type=id_type, id_value=id_value, permission=permission)
+
+  def upload_dir_contents(self, source_dir, dest_bucket, dest_dir,
+                          predefined_acl=None, fine_grained_acl_list=None):
+    """Recursively upload contents of a local directory to Google Storage.
+
+    params:
+      source_dir: full path (local-OS-style) on local disk of directory to copy
+          contents of
+      dest_bucket: GCS bucket to copy the files into
+      dest_dir: full path (Posix-style) within that bucket; write the files into
+          this directory
+      predefined_acl: which predefined ACL to apply to the files on Google
+          Storage; must be one of the PREDEFINED_ACL_* constants defined above.
+          If None, inherits dest_bucket's default object ACL.
+          TODO(epoger): add unittests for this param, although it seems to work
+          in my manual testing
+      fine_grained_acl_list: list of (id_type, id_value, permission) tuples
+          to apply to every file uploaded (on top of the predefined_acl),
+          or None if predefined_acl is sufficient
+          TODO(epoger): add unittests for this param, although it seems to work
+          in my manual testing
+
+    The copy operates as a "merge with overwrite": any files in source_dir will
+    be "overlaid" on top of the existing content in dest_dir.  Existing files
+    with the same names will be overwritten.
+
+    TODO(epoger): Upload multiple files simultaneously to reduce latency.
+
+    TODO(epoger): Add a "noclobber" mode that will not upload any files would
+    overwrite existing files in Google Storage.
+
+    TODO(epoger): Consider adding a do_compress parameter that would compress
+    the file using gzip before upload, and add a "Content-Encoding:gzip" header
+    so that HTTP downloads of the file would be unzipped automatically.
+    See https://developers.google.com/storage/docs/gsutil/addlhelp/
+        WorkingWithObjectMetadata#content-encoding
+    """
+    b = self._connect_to_bucket(bucket_name=dest_bucket)
+    for filename in sorted(os.listdir(source_dir)):
+      local_path = os.path.join(source_dir, filename)
+      if os.path.isdir(local_path):
+        self.upload_dir_contents(  # recurse
+            source_dir=local_path, dest_bucket=dest_bucket,
+            dest_dir=posixpath.join(dest_dir, filename),
+            predefined_acl=predefined_acl)
+      else:
+        item = Key(b)
+        item.key = posixpath.join(dest_dir, filename)
+        try:
+          item.set_contents_from_filename(
+              filename=local_path, policy=predefined_acl)
+        except BotoServerError, e:
+          e.body = (repr(e.body) +
+                    ' while uploading local_path=%s to bucket=%s, path=%s' % (
+                        local_path, dest_bucket, item.key))
+          raise
+        # TODO(epoger): This may be inefficient, because it calls
+        # _connect_to_bucket() for every file.  Depending on how expensive that
+        # call is, we may want to optimize this.
+        for (id_type, id_value, permission) in fine_grained_acl_list or []:
+          self.set_acl(
+              bucket=dest_bucket, path=item.key,
+              id_type=id_type, id_value=id_value, permission=permission)
 
   def download_file(self, source_bucket, source_path, dest_path,
                     create_subdirs_if_needed=False):
@@ -155,14 +258,59 @@ class GSUtils(object):
       create_subdirs_if_needed: boolean; whether to create subdirectories as
           needed to create dest_path
     """
-    conn = self._create_connection()
-    b = conn.get_bucket(bucket_name=source_bucket)
+    b = self._connect_to_bucket(bucket_name=source_bucket)
     item = Key(b)
     item.key = source_path
     if create_subdirs_if_needed:
       _makedirs_if_needed(os.path.dirname(dest_path))
     with open(dest_path, 'w') as f:
-      item.get_contents_to_file(fp=f)
+      try:
+        item.get_contents_to_file(fp=f)
+      except BotoServerError, e:
+        e.body = (repr(e.body) +
+                  ' while downloading bucket=%s, path=%s to local_path=%s' % (
+                      source_bucket, source_path, dest_path))
+        raise
+
+  def download_dir_contents(self, source_bucket, source_dir, dest_dir):
+    """Recursively download contents of a Google Storage directory to local disk
+
+    params:
+      source_bucket: GCS bucket to copy the files from
+      source_dir: full path (Posix-style) within that bucket; read the files
+          from this directory
+      dest_dir: full path (local-OS-style) on local disk of directory to copy
+          the files into
+
+    The copy operates as a "merge with overwrite": any files in source_dir will
+    be "overlaid" on top of the existing content in dest_dir.  Existing files
+    with the same names will be overwritten.
+
+    TODO(epoger): Download multiple files simultaneously to reduce latency.
+    """
+    _makedirs_if_needed(dest_dir)
+    b = self._connect_to_bucket(bucket_name=source_bucket)
+    (dirs, files) = self.list_bucket_contents(
+        bucket=source_bucket, subdir=source_dir)
+
+    for filename in files:
+      item = Key(b)
+      item.key = posixpath.join(source_dir, filename)
+      dest_path = os.path.join(dest_dir, filename)
+      with open(dest_path, 'w') as f:
+        try:
+          item.get_contents_to_file(fp=f)
+        except BotoServerError, e:
+          e.body = (repr(e.body) +
+                    ' while downloading bucket=%s, path=%s to local_path=%s' % (
+                        source_bucket, item.key, dest_path))
+          raise
+
+    for dirname in dirs:
+      self.download_dir_contents(  # recurse
+          source_bucket=source_bucket,
+          source_dir=posixpath.join(source_dir, dirname),
+          dest_dir=os.path.join(dest_dir, dirname))
 
   def get_acl(self, bucket, path, id_type, id_value):
     """Retrieve partial access permissions on a single file in Google Storage.
@@ -171,6 +319,9 @@ class GSUtils(object):
     other than that returned by this call, if they have been granted those
     rights based on *other* id_types (e.g., perhaps they have group access
     rights, beyond their individual access rights).
+
+    TODO(epoger): What if the remote file does not exist?  This should probably
+    raise an exception in that case.
 
     Params:
       bucket: GS bucket
@@ -184,8 +335,7 @@ class GSUtils(object):
         permissions have been set.
     """
     field = FIELD_BY_ID_TYPE[id_type]
-    conn = self._create_connection()
-    b = conn.get_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket_name=bucket)
     acls = b.get_acl(key_name=path)
     matching_entries = [entry for entry in acls.entries.entry_list
                         if (entry.scope.type == id_type) and
@@ -207,6 +357,9 @@ class GSUtils(object):
 
     If there is already a permission set on this file for this id_type/id_value
     combination, this call will overwrite it.
+
+    TODO(epoger): What if the remote file does not exist?  This should probably
+    raise an exception in that case.
 
     Params:
       bucket: GS bucket
@@ -231,8 +384,7 @@ class GSUtils(object):
       assert PERMISSION_WRITE == get_acl(bucket, path, id_type, id_value)
     """
     field = FIELD_BY_ID_TYPE[id_type]
-    conn = self._create_connection()
-    b = conn.get_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket_name=bucket)
     acls = b.get_acl(key_name=path)
 
     # Remove any existing entries that refer to the same id_type/id_value,
@@ -257,6 +409,9 @@ class GSUtils(object):
   def list_bucket_contents(self, bucket, subdir=None):
     """Returns files in the Google Storage bucket as a (dirs, files) tuple.
 
+    TODO(epoger): This should raise an exception if subdir does not exist in
+    Google Storage; right now, it just returns empty contents.
+
     Args:
       bucket: name of the Google Storage bucket
       subdir: directory within the bucket to list, or None for root directory
@@ -267,8 +422,7 @@ class GSUtils(object):
       prefix += '/'
     prefix_length = len(prefix) if prefix else 0
 
-    conn = self._create_connection()
-    b = conn.get_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket_name=bucket)
     lister = BucketListResultSet(bucket=b, prefix=prefix, delimiter='/')
     dirs = []
     files = []
@@ -279,6 +433,18 @@ class GSUtils(object):
       elif t is Prefix:
         dirs.append(item.name[prefix_length:-1])
     return (dirs, files)
+
+  def _connect_to_bucket(self, bucket_name):
+    """Returns a Bucket object we can use to access a particular bucket in GS.
+
+    Params:
+      bucket_name: name of the bucket (e.g., 'chromium-skia-gm')
+    """
+    try:
+      return self._create_connection().get_bucket(bucket_name=bucket_name)
+    except BotoServerError, e:
+      e.body = repr(e.body) + ' while connecting to bucket=%s' % bucket_name
+      raise
 
   def _create_connection(self):
     """Returns a GSConnection object we can use to access Google Storage."""
@@ -349,16 +515,26 @@ and write gs://chromium-skia-gm ?
   subdir = 'subdir'
   filenames_to_upload = ['file1', 'file2']
 
-  # Upload test files to Google Storage.
+  # Upload test files to Google Storage, checking that their fine-grained
+  # ACLs were set correctly.
+  id_type = ID_TYPE_GROUP_BY_DOMAIN
+  id_value = 'chromium.org'
+  set_permission = PERMISSION_READ
   local_src_dir = tempfile.mkdtemp()
   os.mkdir(os.path.join(local_src_dir, subdir))
   try:
     for filename in filenames_to_upload:
       with open(os.path.join(local_src_dir, subdir, filename), 'w') as f:
         f.write('contents of %s\n' % filename)
-      gs.upload_file(source_path=os.path.join(local_src_dir, subdir, filename),
-                     dest_bucket=bucket,
-                     dest_path=posixpath.join(remote_dir, subdir, filename))
+      dest_path = posixpath.join(remote_dir, subdir, filename)
+      gs.upload_file(
+          source_path=os.path.join(local_src_dir, subdir, filename),
+          dest_bucket=bucket, dest_path=dest_path,
+          fine_grained_acl_list=[(id_type, id_value, set_permission)])
+      got_permission = gs.get_acl(bucket=bucket, path=dest_path,
+                                  id_type=id_type, id_value=id_value)
+      assert got_permission == set_permission, '%s == %s' % (
+          got_permission, set_permission)
   finally:
     shutil.rmtree(local_src_dir)
 
@@ -434,10 +610,68 @@ and write gs://chromium-skia-gm ?
   assert files == [], '%s == []' % files
 
 
+def _test_dir_upload_and_download():
+  """Test upload_dir_contents() and download_dir_contents()."""
+  try:
+    gs = GSUtils(boto_file_path=os.path.expanduser(os.path.join('~','.boto')))
+  except:
+    print """
+Failed to instantiate GSUtils object with default .boto file path.
+Do you have a ~/.boto file that provides the credentials needed to read
+and write gs://chromium-skia-gm ?
+"""
+    raise
+
+  bucket = 'chromium-skia-gm'
+  remote_dir = 'gs_utils_test/%d' % random.randint(0, sys.maxint)
+  subdir = 'subdir'
+  filenames = ['file1', 'file2']
+
+  # Create directory tree on local disk, and upload it.
+  local_src_dir = tempfile.mkdtemp()
+  os.mkdir(os.path.join(local_src_dir, subdir))
+  try:
+    for filename in filenames:
+      with open(os.path.join(local_src_dir, subdir, filename), 'w') as f:
+        f.write('contents of %s\n' % filename)
+      gs.upload_dir_contents(source_dir=local_src_dir, dest_bucket=bucket,
+                             dest_dir=remote_dir)
+  finally:
+    shutil.rmtree(local_src_dir)
+
+  # Validate the list of the files we uploaded to Google Storage.
+  (dirs, files) = gs.list_bucket_contents(
+      bucket=bucket, subdir=remote_dir)
+  assert dirs == [subdir], '%s == [%s]' % (dirs, subdir)
+  assert files == [], '%s == []' % files
+  (dirs, files) = gs.list_bucket_contents(
+      bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
+  assert dirs == [], '%s == []' % dirs
+  assert files == filenames, '%s == %s' % (files, filenames)
+
+  # Download the directory tree we just uploaded, make sure its contents
+  # are what we expect, and then delete the tree in Google Storage.
+  local_dest_dir = tempfile.mkdtemp()
+  try:
+    gs.download_dir_contents(source_bucket=bucket, source_dir=remote_dir,
+                             dest_dir=local_dest_dir)
+    for filename in filenames:
+      with open(os.path.join(local_dest_dir, subdir, filename)) as f:
+        file_contents = f.read()
+      assert file_contents == 'contents of %s\n' % filename, (
+          '%s == "contents of %s\n"' % (file_contents, filename))
+  finally:
+    shutil.rmtree(local_dest_dir)
+    for filename in filenames:
+      gs.delete_file(bucket=bucket,
+                     path=posixpath.join(remote_dir, subdir, filename))
+
+
 # TODO(epoger): How should we exercise these self-tests?
 # See http://skbug.com/2751
 if __name__ == '__main__':
   _test_public_read()
   _test_authenticated_round_trip()
+  _test_dir_upload_and_download()
   # TODO(epoger): Add _test_unauthenticated_access() to make sure we raise
   # an exception when we try to access without needed credentials.
