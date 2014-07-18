@@ -202,8 +202,6 @@ class GSUtils(object):
       fine_grained_acl_list: list of (id_type, id_value, permission) tuples
           to apply to every file uploaded (on top of the predefined_acl),
           or None if predefined_acl is sufficient
-          TODO(epoger): add unittests for this param, although it seems to work
-          in my manual testing
 
     The copy operates as a "merge with overwrite": any files in source_dir will
     be "overlaid" on top of the existing content in dest_dir.  Existing files
@@ -227,24 +225,26 @@ class GSUtils(object):
         self.upload_dir_contents(  # recurse
             source_dir=local_path, dest_bucket=dest_bucket,
             dest_dir=posixpath.join(dest_dir, filename),
-            predefined_acl=predefined_acl)
+            predefined_acl=predefined_acl,
+            fine_grained_acl_list=fine_grained_acl_list)
       else:
         item = Key(b)
-        item.key = posixpath.join(dest_dir, filename)
+        dest_path = posixpath.join(dest_dir, filename)
+        item.key = dest_path
         try:
           item.set_contents_from_filename(
               filename=local_path, policy=predefined_acl)
         except BotoServerError, e:
           e.body = (repr(e.body) +
                     ' while uploading local_path=%s to bucket=%s, path=%s' % (
-                        local_path, dest_bucket, item.key))
+                        local_path, dest_bucket, dest_path))
           raise
         # TODO(epoger): This may be inefficient, because it calls
         # _connect_to_bucket() for every file.  Depending on how expensive that
         # call is, we may want to optimize this.
         for (id_type, id_value, permission) in fine_grained_acl_list or []:
           self.set_acl(
-              bucket=dest_bucket, path=item.key,
+              bucket=dest_bucket, path=dest_path,
               id_type=id_type, id_value=id_value, permission=permission)
 
   def download_file(self, source_bucket, source_path, dest_path,
@@ -627,15 +627,20 @@ and write gs://chromium-skia-gm ?
   subdir = 'subdir'
   filenames = ['file1', 'file2']
 
-  # Create directory tree on local disk, and upload it.
+  # Create directory tree on local disk and upload it.
+  id_type = ID_TYPE_GROUP_BY_DOMAIN
+  id_value = 'chromium.org'
+  set_permission = PERMISSION_READ
   local_src_dir = tempfile.mkdtemp()
   os.mkdir(os.path.join(local_src_dir, subdir))
   try:
     for filename in filenames:
       with open(os.path.join(local_src_dir, subdir, filename), 'w') as f:
         f.write('contents of %s\n' % filename)
-      gs.upload_dir_contents(source_dir=local_src_dir, dest_bucket=bucket,
-                             dest_dir=remote_dir)
+    gs.upload_dir_contents(
+        source_dir=local_src_dir, dest_bucket=bucket, dest_dir=remote_dir,
+        predefined_acl=PREDEFINED_ACL_PRIVATE,
+        fine_grained_acl_list=[(id_type, id_value, set_permission)])
   finally:
     shutil.rmtree(local_src_dir)
 
@@ -648,6 +653,14 @@ and write gs://chromium-skia-gm ?
       bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
   assert dirs == [], '%s == []' % dirs
   assert files == filenames, '%s == %s' % (files, filenames)
+
+  # Check the fine-grained ACLs we set in Google Storage.
+  for filename in filenames:
+    got_permission = gs.get_acl(
+        bucket=bucket, path=posixpath.join(remote_dir, subdir, filename),
+        id_type=id_type, id_value=id_value)
+    assert got_permission == set_permission, '%s == %s' % (
+        got_permission, set_permission)
 
   # Download the directory tree we just uploaded, make sure its contents
   # are what we expect, and then delete the tree in Google Storage.
