@@ -20,11 +20,8 @@ API/library references:
 import errno
 import os
 import posixpath
-import random
 import re
-import shutil
 import sys
-import tempfile
 
 # Imports from third-party code
 TRUNK_DIRECTORY = os.path.abspath(os.path.join(
@@ -44,43 +41,6 @@ from boto.gs.key import Key
 from boto.s3.bucketlistresultset import BucketListResultSet
 from boto.s3.connection import SubdomainCallingFormat
 from boto.s3.prefix import Prefix
-
-# Predefined (aka "canned") ACLs that provide a "base coat" of permissions for
-# each file in Google Storage.  See CannedACLStrings in
-# https://github.com/boto/boto/blob/develop/boto/gs/acl.py
-# Also see https://developers.google.com/storage/docs/accesscontrol
-PREDEFINED_ACL_AUTHENTICATED_READ        = 'authenticated-read'
-PREDEFINED_ACL_BUCKET_OWNER_FULL_CONTROL = 'bucket-owner-full-control'
-PREDEFINED_ACL_BUCKET_OWNER_READ         = 'bucket-owner-read'
-PREDEFINED_ACL_PRIVATE                   = 'private'
-PREDEFINED_ACL_PROJECT_PRIVATE           = 'project-private'
-PREDEFINED_ACL_PUBLIC_READ               = 'public-read'
-PREDEFINED_ACL_PUBLIC_READ_WRITE         = 'public-read-write'
-
-# "Fine-grained" permissions that may be set per user/group on each file in
-# Google Storage.  See SupportedPermissions in
-# https://github.com/boto/boto/blob/develop/boto/gs/acl.py
-# Also see https://developers.google.com/storage/docs/accesscontrol
-PERMISSION_NONE  = None
-PERMISSION_OWNER = 'FULL_CONTROL'
-PERMISSION_READ  = 'READ'
-PERMISSION_WRITE = 'WRITE'
-
-# Types of identifiers we can use to set "fine-grained" ACLs.
-ID_TYPE_GROUP_BY_DOMAIN = acl.GROUP_BY_DOMAIN
-ID_TYPE_GROUP_BY_EMAIL  = acl.GROUP_BY_EMAIL
-ID_TYPE_GROUP_BY_ID     = acl.GROUP_BY_ID
-ID_TYPE_USER_BY_EMAIL   = acl.USER_BY_EMAIL
-ID_TYPE_USER_BY_ID      = acl.USER_BY_ID
-
-# Which field we get/set in ACL entries, depending on ID_TYPE.
-FIELD_BY_ID_TYPE = {
-    ID_TYPE_GROUP_BY_DOMAIN: 'domain',
-    ID_TYPE_GROUP_BY_EMAIL: 'email_address',
-    ID_TYPE_GROUP_BY_ID: 'id',
-    ID_TYPE_USER_BY_EMAIL: 'email_address',
-    ID_TYPE_USER_BY_ID: 'id',
-}
 
 
 class AnonymousGSConnection(GSConnection):
@@ -105,6 +65,42 @@ class AnonymousGSConnection(GSConnection):
 class GSUtils(object):
   """Utilities for accessing Google Cloud Storage, using the boto library."""
 
+  class Permission:
+    """Fine-grained permissions that may be set per user/group on each file.
+
+    See SupportedPermissions in
+    https://github.com/boto/boto/blob/develop/boto/gs/acl.py
+    Also see https://developers.google.com/storage/docs/accesscontrol
+    """
+    EMPTY = None
+    OWNER = 'FULL_CONTROL'
+    READ  = 'READ'
+    WRITE = 'WRITE'
+
+  class PredefinedACL:
+    """Canned ACLs that provide a "base coat" of permissions for each file.
+
+    See CannedACLStrings in
+    https://github.com/boto/boto/blob/develop/boto/gs/acl.py
+    Also see https://developers.google.com/storage/docs/accesscontrol
+    """
+    AUTHENTICATED_READ        = 'authenticated-read'
+    BUCKET_OWNER_FULL_CONTROL = 'bucket-owner-full-control'
+    BUCKET_OWNER_READ         = 'bucket-owner-read'
+    PRIVATE                   = 'private'
+    PROJECT_PRIVATE           = 'project-private'
+    PUBLIC_READ               = 'public-read'
+    PUBLIC_READ_WRITE         = 'public-read-write'
+
+  class IdType:
+    """Types of identifiers we can use to set "fine-grained" ACLs."""
+    GROUP_BY_DOMAIN = acl.GROUP_BY_DOMAIN
+    GROUP_BY_EMAIL  = acl.GROUP_BY_EMAIL
+    GROUP_BY_ID     = acl.GROUP_BY_ID
+    USER_BY_EMAIL   = acl.USER_BY_EMAIL
+    USER_BY_ID      = acl.USER_BY_ID
+
+
   def __init__(self, boto_file_path=None):
     """Constructor.
 
@@ -123,6 +119,14 @@ class GSUtils(object):
       boto_dict = _config_file_as_dict(filepath=boto_file_path)
       self._gs_access_key_id = boto_dict['gs_access_key_id']
       self._gs_secret_access_key = boto_dict['gs_secret_access_key']
+    # Which field we get/set in ACL entries, depending on IdType.
+    self._field_by_id_type = {
+        self.IdType.GROUP_BY_DOMAIN: 'domain',
+        self.IdType.GROUP_BY_EMAIL:  'email_address',
+        self.IdType.GROUP_BY_ID:     'id',
+        self.IdType.USER_BY_EMAIL:   'email_address',
+        self.IdType.USER_BY_ID:      'id',
+    }
 
   def delete_file(self, bucket, path):
     """Delete a single file within a GS bucket.
@@ -157,7 +161,7 @@ class GSUtils(object):
       dest_bucket: GCS bucket to copy the file to
       dest_path: full path (Posix-style) within that bucket
       predefined_acl: which predefined ACL to apply to the file on Google
-          Storage; must be one of the PREDEFINED_ACL_* constants defined above.
+          Storage; must be one of the PredefinedACL values defined above.
           If None, inherits dest_bucket's default object ACL.
           TODO(epoger): add unittests for this param, although it seems to work
           in my manual testing
@@ -195,7 +199,7 @@ class GSUtils(object):
       dest_dir: full path (Posix-style) within that bucket; write the files into
           this directory
       predefined_acl: which predefined ACL to apply to the files on Google
-          Storage; must be one of the PREDEFINED_ACL_* constants defined above.
+          Storage; must be one of the PredefinedACL values defined above.
           If None, inherits dest_bucket's default object ACL.
           TODO(epoger): add unittests for this param, although it seems to work
           in my manual testing
@@ -326,15 +330,15 @@ class GSUtils(object):
     Params:
       bucket: GS bucket
       path: full path (Posix-style) to the file within that bucket
-      id_type: must be one of the ID_TYPE_* constants defined above
+      id_type: must be one of the IdType values defined above
       id_value: get permissions for users whose id_type field contains this
           value
 
-    Returns: the PERMISSION_* constant which has been set for users matching
-        this id_type/id_value, on this file; or PERMISSION_NONE if no such
+    Returns: the Permission value which has been set for users matching
+        this id_type/id_value, on this file; or Permission.EMPTY if no such
         permissions have been set.
     """
-    field = FIELD_BY_ID_TYPE[id_type]
+    field = self._field_by_id_type[id_type]
     b = self._connect_to_bucket(bucket_name=bucket)
     acls = b.get_acl(key_name=path)
     matching_entries = [entry for entry in acls.entries.entry_list
@@ -344,7 +348,7 @@ class GSUtils(object):
       assert len(matching_entries) == 1, '%d == 1' % len(matching_entries)
       return matching_entries[0].permission
     else:
-      return PERMISSION_NONE
+      return self.Permission.EMPTY
 
   def set_acl(self, bucket, path, id_type, id_value, permission):
     """Set partial access permissions on a single file in Google Storage.
@@ -364,11 +368,11 @@ class GSUtils(object):
     Params:
       bucket: GS bucket
       path: full path (Posix-style) to the file within that bucket
-      id_type: must be one of the ID_TYPE_* constants defined above
+      id_type: must be one of the IdType values defined above
       id_value: add permission for users whose id_type field contains this value
       permission: permission to add for users matching id_type/id_value;
-          must be one of the PERMISSION_* constants defined above.
-          If PERMISSION_NONE, then any permissions will be granted to this
+          must be one of the Permission values defined above.
+          If Permission.EMPTY, then any permissions will be granted to this
           particular id_type/id_value will be removed... but, given that
           permissions are additive, specific users may still have access rights
           based on permissions given to *other* id_type/id_value pairs.
@@ -376,14 +380,14 @@ class GSUtils(object):
     Example Code:
       bucket = 'gs://bucket-name'
       path = 'path/to/file'
-      id_type = ID_TYPE_USER_BY_EMAIL
+      id_type = IdType.USER_BY_EMAIL
       id_value = 'epoger@google.com'
-      set_acl(bucket, path, id_type, id_value, PERMISSION_READ)
-      assert PERMISSION_READ == get_acl(bucket, path, id_type, id_value)
-      set_acl(bucket, path, id_type, id_value, PERMISSION_WRITE)
-      assert PERMISSION_WRITE == get_acl(bucket, path, id_type, id_value)
+      set_acl(bucket, path, id_type, id_value, Permission.READ)
+      assert Permission.READ == get_acl(bucket, path, id_type, id_value)
+      set_acl(bucket, path, id_type, id_value, Permission.WRITE)
+      assert Permission.WRITE == get_acl(bucket, path, id_type, id_value)
     """
-    field = FIELD_BY_ID_TYPE[id_type]
+    field = self._field_by_id_type[id_type]
     b = self._connect_to_bucket(bucket_name=bucket)
     acls = b.get_acl(key_name=path)
 
@@ -397,7 +401,7 @@ class GSUtils(object):
       acls.entries.entry_list.remove(matching_entries[0])
 
     # Add a new entry to the ACLs.
-    if permission != PERMISSION_NONE:
+    if permission != self.Permission.EMPTY:
       args = {'type': id_type, 'permission': permission}
       args[field] = id_value
       new_entry = acl.Entry(**args)
@@ -455,6 +459,7 @@ class GSUtils(object):
     else:
       return AnonymousGSConnection()
 
+
 def _config_file_as_dict(filepath):
   """Reads a boto-style config file into a dict.
 
@@ -491,200 +496,3 @@ def _makedirs_if_needed(path):
   except OSError as e:
     if e.errno != errno.EEXIST:
       raise
-
-
-def _test_public_read():
-  """Make sure we can read from public files without .boto file credentials."""
-  gs = GSUtils()
-  gs.list_bucket_contents(bucket='chromium-skia-gm-summaries', subdir=None)
-
-
-def _test_authenticated_round_trip():
-  try:
-    gs = GSUtils(boto_file_path=os.path.expanduser(os.path.join('~','.boto')))
-  except:
-    print """
-Failed to instantiate GSUtils object with default .boto file path.
-Do you have a ~/.boto file that provides the credentials needed to read
-and write gs://chromium-skia-gm ?
-"""
-    raise
-
-  bucket = 'chromium-skia-gm'
-  remote_dir = 'gs_utils_test/%d' % random.randint(0, sys.maxint)
-  subdir = 'subdir'
-  filenames_to_upload = ['file1', 'file2']
-
-  # Upload test files to Google Storage, checking that their fine-grained
-  # ACLs were set correctly.
-  id_type = ID_TYPE_GROUP_BY_DOMAIN
-  id_value = 'chromium.org'
-  set_permission = PERMISSION_READ
-  local_src_dir = tempfile.mkdtemp()
-  os.mkdir(os.path.join(local_src_dir, subdir))
-  try:
-    for filename in filenames_to_upload:
-      with open(os.path.join(local_src_dir, subdir, filename), 'w') as f:
-        f.write('contents of %s\n' % filename)
-      dest_path = posixpath.join(remote_dir, subdir, filename)
-      gs.upload_file(
-          source_path=os.path.join(local_src_dir, subdir, filename),
-          dest_bucket=bucket, dest_path=dest_path,
-          fine_grained_acl_list=[(id_type, id_value, set_permission)])
-      got_permission = gs.get_acl(bucket=bucket, path=dest_path,
-                                  id_type=id_type, id_value=id_value)
-      assert got_permission == set_permission, '%s == %s' % (
-          got_permission, set_permission)
-  finally:
-    shutil.rmtree(local_src_dir)
-
-  # Get a list of the files we uploaded to Google Storage.
-  (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=remote_dir)
-  assert dirs == [subdir], '%s == [%s]' % (dirs, subdir)
-  assert files == [], '%s == []' % files
-  (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
-  assert dirs == [], '%s == []' % dirs
-  assert files == filenames_to_upload, '%s == %s' % (files, filenames_to_upload)
-
-  # Manipulate ACLs on one of those files, and verify them.
-  # TODO(epoger): Test id_types other than ID_TYPE_GROUP_BY_DOMAIN ?
-  # TODO(epoger): Test setting multiple ACLs on the same file?
-  id_type = ID_TYPE_GROUP_BY_DOMAIN
-  id_value = 'google.com'
-  fullpath = posixpath.join(remote_dir, subdir, filenames_to_upload[0])
-  # Make sure ACL is empty to start with ...
-  gs.set_acl(bucket=bucket, path=fullpath,
-             id_type=id_type, id_value=id_value, permission=PERMISSION_NONE)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
-                          id_type=id_type, id_value=id_value)
-  assert permission == PERMISSION_NONE, '%s == %s' % (
-      permission, PERMISSION_NONE)
-  # ... set it to OWNER ...
-  gs.set_acl(bucket=bucket, path=fullpath,
-             id_type=id_type, id_value=id_value, permission=PERMISSION_OWNER)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
-                          id_type=id_type, id_value=id_value)
-  assert permission == PERMISSION_OWNER, '%s == %s' % (
-      permission, PERMISSION_OWNER)
-  # ... now set it to READ ...
-  gs.set_acl(bucket=bucket, path=fullpath,
-             id_type=id_type, id_value=id_value, permission=PERMISSION_READ)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
-                          id_type=id_type, id_value=id_value)
-  assert permission == PERMISSION_READ, '%s == %s' % (
-      permission, PERMISSION_READ)
-  # ... and clear it again to finish.
-  gs.set_acl(bucket=bucket, path=fullpath,
-             id_type=id_type, id_value=id_value, permission=PERMISSION_NONE)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
-                          id_type=id_type, id_value=id_value)
-  assert permission == PERMISSION_NONE, '%s == %s' % (
-      permission, PERMISSION_NONE)
-
-  # Download the files we uploaded to Google Storage, and validate contents.
-  local_dest_dir = tempfile.mkdtemp()
-  try:
-    for filename in filenames_to_upload:
-      gs.download_file(source_bucket=bucket,
-                       source_path=posixpath.join(remote_dir, subdir, filename),
-                       dest_path=os.path.join(local_dest_dir, subdir, filename),
-                       create_subdirs_if_needed=True)
-      with open(os.path.join(local_dest_dir, subdir, filename)) as f:
-        file_contents = f.read()
-      assert file_contents == 'contents of %s\n' % filename, (
-          '%s == "contents of %s\n"' % (file_contents, filename))
-  finally:
-    shutil.rmtree(local_dest_dir)
-
-  # Delete all the files we uploaded to Google Storage.
-  for filename in filenames_to_upload:
-    gs.delete_file(bucket=bucket,
-                   path=posixpath.join(remote_dir, subdir, filename))
-
-  # Confirm that we deleted all the files we uploaded to Google Storage.
-  (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
-  assert dirs == [], '%s == []' % dirs
-  assert files == [], '%s == []' % files
-
-
-def _test_dir_upload_and_download():
-  """Test upload_dir_contents() and download_dir_contents()."""
-  try:
-    gs = GSUtils(boto_file_path=os.path.expanduser(os.path.join('~','.boto')))
-  except:
-    print """
-Failed to instantiate GSUtils object with default .boto file path.
-Do you have a ~/.boto file that provides the credentials needed to read
-and write gs://chromium-skia-gm ?
-"""
-    raise
-
-  bucket = 'chromium-skia-gm'
-  remote_dir = 'gs_utils_test/%d' % random.randint(0, sys.maxint)
-  subdir = 'subdir'
-  filenames = ['file1', 'file2']
-
-  # Create directory tree on local disk and upload it.
-  id_type = ID_TYPE_GROUP_BY_DOMAIN
-  id_value = 'chromium.org'
-  set_permission = PERMISSION_READ
-  local_src_dir = tempfile.mkdtemp()
-  os.mkdir(os.path.join(local_src_dir, subdir))
-  try:
-    for filename in filenames:
-      with open(os.path.join(local_src_dir, subdir, filename), 'w') as f:
-        f.write('contents of %s\n' % filename)
-    gs.upload_dir_contents(
-        source_dir=local_src_dir, dest_bucket=bucket, dest_dir=remote_dir,
-        predefined_acl=PREDEFINED_ACL_PRIVATE,
-        fine_grained_acl_list=[(id_type, id_value, set_permission)])
-  finally:
-    shutil.rmtree(local_src_dir)
-
-  # Validate the list of the files we uploaded to Google Storage.
-  (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=remote_dir)
-  assert dirs == [subdir], '%s == [%s]' % (dirs, subdir)
-  assert files == [], '%s == []' % files
-  (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
-  assert dirs == [], '%s == []' % dirs
-  assert files == filenames, '%s == %s' % (files, filenames)
-
-  # Check the fine-grained ACLs we set in Google Storage.
-  for filename in filenames:
-    got_permission = gs.get_acl(
-        bucket=bucket, path=posixpath.join(remote_dir, subdir, filename),
-        id_type=id_type, id_value=id_value)
-    assert got_permission == set_permission, '%s == %s' % (
-        got_permission, set_permission)
-
-  # Download the directory tree we just uploaded, make sure its contents
-  # are what we expect, and then delete the tree in Google Storage.
-  local_dest_dir = tempfile.mkdtemp()
-  try:
-    gs.download_dir_contents(source_bucket=bucket, source_dir=remote_dir,
-                             dest_dir=local_dest_dir)
-    for filename in filenames:
-      with open(os.path.join(local_dest_dir, subdir, filename)) as f:
-        file_contents = f.read()
-      assert file_contents == 'contents of %s\n' % filename, (
-          '%s == "contents of %s\n"' % (file_contents, filename))
-  finally:
-    shutil.rmtree(local_dest_dir)
-    for filename in filenames:
-      gs.delete_file(bucket=bucket,
-                     path=posixpath.join(remote_dir, subdir, filename))
-
-
-# TODO(epoger): How should we exercise these self-tests?
-# See http://skbug.com/2751
-if __name__ == '__main__':
-  _test_public_read()
-  _test_authenticated_round_trip()
-  _test_dir_upload_and_download()
-  # TODO(epoger): Add _test_unauthenticated_access() to make sure we raise
-  # an exception when we try to access without needed credentials.
