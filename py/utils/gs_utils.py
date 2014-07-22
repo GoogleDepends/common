@@ -197,7 +197,7 @@ class GSUtils(object):
           contents of
       dest_bucket: GCS bucket to copy the files into
       dest_dir: full path (Posix-style) within that bucket; write the files into
-          this directory
+          this directory.  If None, write into the root directory of the bucket.
       predefined_acl: which predefined ACL to apply to the files on Google
           Storage; must be one of the PredefinedACL values defined above.
           If None, inherits dest_bucket's default object ACL.
@@ -225,30 +225,34 @@ class GSUtils(object):
     b = self._connect_to_bucket(bucket_name=dest_bucket)
     for filename in sorted(os.listdir(source_dir)):
       local_path = os.path.join(source_dir, filename)
+      if dest_dir:
+        remote_path = posixpath.join(dest_dir, filename)
+      else:
+        remote_path = filename
+
       if os.path.isdir(local_path):
         self.upload_dir_contents(  # recurse
             source_dir=local_path, dest_bucket=dest_bucket,
-            dest_dir=posixpath.join(dest_dir, filename),
+            dest_dir=remote_path,
             predefined_acl=predefined_acl,
             fine_grained_acl_list=fine_grained_acl_list)
       else:
         item = Key(b)
-        dest_path = posixpath.join(dest_dir, filename)
-        item.key = dest_path
+        item.key = remote_path
         try:
           item.set_contents_from_filename(
               filename=local_path, policy=predefined_acl)
         except BotoServerError, e:
           e.body = (repr(e.body) +
                     ' while uploading local_path=%s to bucket=%s, path=%s' % (
-                        local_path, dest_bucket, dest_path))
+                        local_path, dest_bucket, remote_path))
           raise
         # TODO(epoger): This may be inefficient, because it calls
         # _connect_to_bucket() for every file.  Depending on how expensive that
         # call is, we may want to optimize this.
         for (id_type, id_value, permission) in fine_grained_acl_list or []:
           self.set_acl(
-              bucket=dest_bucket, path=dest_path,
+              bucket=dest_bucket, path=remote_path,
               id_type=id_type, id_value=id_value, permission=permission)
 
   def download_file(self, source_bucket, source_path, dest_path,
