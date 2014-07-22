@@ -16,27 +16,37 @@ import tempfile
 # Local imports.
 import gs_utils
 
-
-def _test_public_read():
-  """Make sure we can read from public files without .boto file credentials."""
-  gs = gs_utils.GSUtils()
-  gs.list_bucket_contents(bucket='chromium-skia-gm-summaries', subdir=None)
+TEST_BUCKET = 'chromium-skia-testing'
 
 
-def _test_authenticated_round_trip():
+def _get_authenticated_gs_handle():
+  """Returns an instance of GSUtils using ~/.boto for authentication."""
   try:
-    gs = gs_utils.GSUtils(
+    return gs_utils.GSUtils(
         boto_file_path=os.path.expanduser(os.path.join('~','.boto')))
   except:
     print """
 Failed to instantiate GSUtils object with default .boto file path.
-Do you have a ~/.boto file that provides the credentials needed to read
-and write gs://chromium-skia-gm ?
-"""
+Do you have a ~/.boto file that provides the credentials needed to write
+into gs://%s?
+""" % TEST_BUCKET
     raise
 
-  bucket = 'chromium-skia-gm'
-  remote_dir = 'gs_utils_test/%d' % random.randint(0, sys.maxint)
+
+def _get_unique_posix_dir():
+  """Returns a unique directory name suitable for use in Google Storage."""
+  return 'gs_utils_manualtest/%d' % random.randint(0, sys.maxint)
+
+
+def _test_public_read():
+  """Make sure we can read from public files without .boto file credentials."""
+  gs = gs_utils.GSUtils()
+  gs.list_bucket_contents(bucket=TEST_BUCKET, subdir=None)
+
+
+def _test_authenticated_round_trip():
+  gs = _get_authenticated_gs_handle()
+  remote_dir = _get_unique_posix_dir()
   subdir = 'subdir'
   filenames_to_upload = ['file1', 'file2']
 
@@ -54,9 +64,9 @@ and write gs://chromium-skia-gm ?
       dest_path = posixpath.join(remote_dir, subdir, filename)
       gs.upload_file(
           source_path=os.path.join(local_src_dir, subdir, filename),
-          dest_bucket=bucket, dest_path=dest_path,
+          dest_bucket=TEST_BUCKET, dest_path=dest_path,
           fine_grained_acl_list=[(id_type, id_value, set_permission)])
-      got_permission = gs.get_acl(bucket=bucket, path=dest_path,
+      got_permission = gs.get_acl(bucket=TEST_BUCKET, path=dest_path,
                                   id_type=id_type, id_value=id_value)
       assert got_permission == set_permission, '%s == %s' % (
           got_permission, set_permission)
@@ -65,11 +75,11 @@ and write gs://chromium-skia-gm ?
 
   # Get a list of the files we uploaded to Google Storage.
   (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=remote_dir)
+      bucket=TEST_BUCKET, subdir=remote_dir)
   assert dirs == [subdir], '%s == [%s]' % (dirs, subdir)
   assert files == [], '%s == []' % files
   (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
+      bucket=TEST_BUCKET, subdir=posixpath.join(remote_dir, subdir))
   assert dirs == [], '%s == []' % dirs
   assert files == filenames_to_upload, '%s == %s' % (files, filenames_to_upload)
 
@@ -80,30 +90,30 @@ and write gs://chromium-skia-gm ?
   id_value = 'google.com'
   fullpath = posixpath.join(remote_dir, subdir, filenames_to_upload[0])
   # Make sure ACL is empty to start with ...
-  gs.set_acl(bucket=bucket, path=fullpath,
+  gs.set_acl(bucket=TEST_BUCKET, path=fullpath,
              id_type=id_type, id_value=id_value, permission=gs.Permission.EMPTY)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
+  permission = gs.get_acl(bucket=TEST_BUCKET, path=fullpath,
                           id_type=id_type, id_value=id_value)
   assert permission == gs.Permission.EMPTY, '%s == %s' % (
       permission, gs.Permission.EMPTY)
   # ... set it to OWNER ...
-  gs.set_acl(bucket=bucket, path=fullpath,
+  gs.set_acl(bucket=TEST_BUCKET, path=fullpath,
              id_type=id_type, id_value=id_value, permission=gs.Permission.OWNER)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
+  permission = gs.get_acl(bucket=TEST_BUCKET, path=fullpath,
                           id_type=id_type, id_value=id_value)
   assert permission == gs.Permission.OWNER, '%s == %s' % (
       permission, gs.Permission.OWNER)
   # ... now set it to READ ...
-  gs.set_acl(bucket=bucket, path=fullpath,
+  gs.set_acl(bucket=TEST_BUCKET, path=fullpath,
              id_type=id_type, id_value=id_value, permission=gs.Permission.READ)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
+  permission = gs.get_acl(bucket=TEST_BUCKET, path=fullpath,
                           id_type=id_type, id_value=id_value)
   assert permission == gs.Permission.READ, '%s == %s' % (
       permission, gs.Permission.READ)
   # ... and clear it again to finish.
-  gs.set_acl(bucket=bucket, path=fullpath,
+  gs.set_acl(bucket=TEST_BUCKET, path=fullpath,
              id_type=id_type, id_value=id_value, permission=gs.Permission.EMPTY)
-  permission = gs.get_acl(bucket=bucket, path=fullpath,
+  permission = gs.get_acl(bucket=TEST_BUCKET, path=fullpath,
                           id_type=id_type, id_value=id_value)
   assert permission == gs.Permission.EMPTY, '%s == %s' % (
       permission, gs.Permission.EMPTY)
@@ -112,7 +122,7 @@ and write gs://chromium-skia-gm ?
   local_dest_dir = tempfile.mkdtemp()
   try:
     for filename in filenames_to_upload:
-      gs.download_file(source_bucket=bucket,
+      gs.download_file(source_bucket=TEST_BUCKET,
                        source_path=posixpath.join(remote_dir, subdir, filename),
                        dest_path=os.path.join(local_dest_dir, subdir, filename),
                        create_subdirs_if_needed=True)
@@ -125,31 +135,20 @@ and write gs://chromium-skia-gm ?
 
   # Delete all the files we uploaded to Google Storage.
   for filename in filenames_to_upload:
-    gs.delete_file(bucket=bucket,
+    gs.delete_file(bucket=TEST_BUCKET,
                    path=posixpath.join(remote_dir, subdir, filename))
 
   # Confirm that we deleted all the files we uploaded to Google Storage.
   (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
+      bucket=TEST_BUCKET, subdir=posixpath.join(remote_dir, subdir))
   assert dirs == [], '%s == []' % dirs
   assert files == [], '%s == []' % files
 
 
 def _test_dir_upload_and_download():
   """Test upload_dir_contents() and download_dir_contents()."""
-  try:
-    gs = gs_utils.GSUtils(
-        boto_file_path=os.path.expanduser(os.path.join('~','.boto')))
-  except:
-    print """
-Failed to instantiate GSUtils object with default .boto file path.
-Do you have a ~/.boto file that provides the credentials needed to read
-and write gs://chromium-skia-gm ?
-"""
-    raise
-
-  bucket = 'chromium-skia-gm'
-  remote_dir = 'gs_utils_test/%d' % random.randint(0, sys.maxint)
+  gs = _get_authenticated_gs_handle()
+  remote_dir = _get_unique_posix_dir()
   subdir = 'subdir'
   filenames = ['file1', 'file2']
 
@@ -164,7 +163,7 @@ and write gs://chromium-skia-gm ?
       with open(os.path.join(local_src_dir, subdir, filename), 'w') as f:
         f.write('contents of %s\n' % filename)
     gs.upload_dir_contents(
-        source_dir=local_src_dir, dest_bucket=bucket, dest_dir=remote_dir,
+        source_dir=local_src_dir, dest_bucket=TEST_BUCKET, dest_dir=remote_dir,
         predefined_acl=gs.PredefinedACL.PRIVATE,
         fine_grained_acl_list=[(id_type, id_value, set_permission)])
   finally:
@@ -172,18 +171,18 @@ and write gs://chromium-skia-gm ?
 
   # Validate the list of the files we uploaded to Google Storage.
   (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=remote_dir)
+      bucket=TEST_BUCKET, subdir=remote_dir)
   assert dirs == [subdir], '%s == [%s]' % (dirs, subdir)
   assert files == [], '%s == []' % files
   (dirs, files) = gs.list_bucket_contents(
-      bucket=bucket, subdir=posixpath.join(remote_dir, subdir))
+      bucket=TEST_BUCKET, subdir=posixpath.join(remote_dir, subdir))
   assert dirs == [], '%s == []' % dirs
   assert files == filenames, '%s == %s' % (files, filenames)
 
   # Check the fine-grained ACLs we set in Google Storage.
   for filename in filenames:
     got_permission = gs.get_acl(
-        bucket=bucket, path=posixpath.join(remote_dir, subdir, filename),
+        bucket=TEST_BUCKET, path=posixpath.join(remote_dir, subdir, filename),
         id_type=id_type, id_value=id_value)
     assert got_permission == set_permission, '%s == %s' % (
         got_permission, set_permission)
@@ -192,7 +191,7 @@ and write gs://chromium-skia-gm ?
   # are what we expect, and then delete the tree in Google Storage.
   local_dest_dir = tempfile.mkdtemp()
   try:
-    gs.download_dir_contents(source_bucket=bucket, source_dir=remote_dir,
+    gs.download_dir_contents(source_bucket=TEST_BUCKET, source_dir=remote_dir,
                              dest_dir=local_dest_dir)
     for filename in filenames:
       with open(os.path.join(local_dest_dir, subdir, filename)) as f:
@@ -202,7 +201,7 @@ and write gs://chromium-skia-gm ?
   finally:
     shutil.rmtree(local_dest_dir)
     for filename in filenames:
-      gs.delete_file(bucket=bucket,
+      gs.delete_file(bucket=TEST_BUCKET,
                      path=posixpath.join(remote_dir, subdir, filename))
 
 
