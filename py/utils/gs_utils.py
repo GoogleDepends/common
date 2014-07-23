@@ -18,6 +18,7 @@ API/library references:
 
 # System-level imports
 import errno
+import hashlib
 import os
 import posixpath
 import re
@@ -139,27 +140,51 @@ class GSUtils(object):
       path: full path (Posix-style) of the file within the bucket to delete
     """
     b = self._connect_to_bucket(bucket_name=bucket)
-    item = Key(b)
-    item.key = path
+    key = Key(b)
+    key.name = path
     try:
-      item.delete()
+      key.delete()
     except BotoServerError, e:
       e.body = (repr(e.body) +
                 ' while deleting bucket=%s, path=%s' % (bucket, path))
       raise
 
-  def upload_file(self, source_path, dest_bucket, dest_path,
-                  predefined_acl=None, fine_grained_acl_list=None):
-    """Upload contents of a local file to Google Storage.
+  def get_last_modified_time(self, bucket, path):
+    """Gets the timestamp of when this file was last modified.
 
-    TODO(epoger): Add the only_if_modified param provided by upload_file() in
-    https://github.com/google/skia-buildbot/blob/master/slave/skia_slave_scripts/utils/old_gs_utils.py ,
-    so we can replace that function with this one.
+    Params:
+      bucket: GS bucket in which to look for the file
+      path: full path (Posix-style) of the file within the bucket to check
+
+    Returns the last modified time, as a freeform string.  If the file was not
+    found, returns None.
+    """
+    b = self._connect_to_bucket(bucket_name=bucket)
+    try:
+      key = b.get_key(key_name=path)
+      if not key:
+        return None
+      return key.last_modified
+    except BotoServerError, e:
+      e.body = (repr(e.body) +
+                ' while getting attributes of bucket=%s, path=%s' % (
+                    bucket, path))
+      raise
+
+  def upload_file(self, source_path, dest_bucket, dest_path,
+                  only_if_modified=False, predefined_acl=None,
+                  fine_grained_acl_list=None):
+    """Upload contents of a local file to Google Storage.
 
     params:
       source_path: full path (local-OS-style) on local disk to read from
       dest_bucket: GCS bucket to copy the file to
       dest_path: full path (Posix-style) within that bucket
+      only_if_modified: if True, only upload the file if it would actually
+          change the content on Google Storage (uploads the file if dest_path
+          does not exist, or if it exists but has different contents than
+          source_path).  Note that this may take longer than just uploading the
+          file without checking first, due to extra round-trips!
       predefined_acl: which predefined ACL to apply to the file on Google
           Storage; must be one of the PredefinedACL values defined above.
           If None, inherits dest_bucket's default object ACL.
@@ -170,22 +195,32 @@ class GSUtils(object):
           or None if predefined_acl is sufficient
     """
     b = self._connect_to_bucket(bucket_name=dest_bucket)
-    item = Key(b)
-    item.key = dest_path
+
+    if only_if_modified:
+      old_key = b.get_key(key_name=dest_path)
+      if old_key:
+        local_md5 = '"%s"' % _get_local_md5(path=source_path)
+        if local_md5 == old_key.etag:
+          print 'Skipping upload of unmodified file %s : %s' % (
+              source_path, local_md5)
+          return
+
+    key = Key(b)
+    key.name = dest_path
     try:
-      item.set_contents_from_filename(filename=source_path,
-                                      policy=predefined_acl)
+      key.set_contents_from_filename(filename=source_path,
+                                     policy=predefined_acl)
     except BotoServerError, e:
       e.body = (repr(e.body) +
                 ' while uploading source_path=%s to bucket=%s, path=%s' % (
-                    source_path, dest_bucket, item.key))
+                    source_path, dest_bucket, key.name))
       raise
     # TODO(epoger): This may be inefficient, because it calls
     # _connect_to_bucket() again.  Depending on how expensive that
     # call is, we may want to optimize this.
     for (id_type, id_value, permission) in fine_grained_acl_list or []:
       self.set_acl(
-          bucket=dest_bucket, path=item.key,
+          bucket=dest_bucket, path=key.name,
           id_type=id_type, id_value=id_value, permission=permission)
 
   def upload_dir_contents(self, source_dir, dest_bucket, dest_dir,
@@ -237,10 +272,10 @@ class GSUtils(object):
             predefined_acl=predefined_acl,
             fine_grained_acl_list=fine_grained_acl_list)
       else:
-        item = Key(b)
-        item.key = remote_path
+        key = Key(b)
+        key.name = remote_path
         try:
-          item.set_contents_from_filename(
+          key.set_contents_from_filename(
               filename=local_path, policy=predefined_acl)
         except BotoServerError, e:
           e.body = (repr(e.body) +
@@ -267,13 +302,13 @@ class GSUtils(object):
           needed to create dest_path
     """
     b = self._connect_to_bucket(bucket_name=source_bucket)
-    item = Key(b)
-    item.key = source_path
+    key = Key(b)
+    key.name = source_path
     if create_subdirs_if_needed:
       _makedirs_if_needed(os.path.dirname(dest_path))
     with open(dest_path, 'w') as f:
       try:
-        item.get_contents_to_file(fp=f)
+        key.get_contents_to_file(fp=f)
       except BotoServerError, e:
         e.body = (repr(e.body) +
                   ' while downloading bucket=%s, path=%s to local_path=%s' % (
@@ -302,16 +337,16 @@ class GSUtils(object):
         bucket=source_bucket, subdir=source_dir)
 
     for filename in files:
-      item = Key(b)
-      item.key = posixpath.join(source_dir, filename)
+      key = Key(b)
+      key.name = posixpath.join(source_dir, filename)
       dest_path = os.path.join(dest_dir, filename)
       with open(dest_path, 'w') as f:
         try:
-          item.get_contents_to_file(fp=f)
+          key.get_contents_to_file(fp=f)
         except BotoServerError, e:
           e.body = (repr(e.body) +
                     ' while downloading bucket=%s, path=%s to local_path=%s' % (
-                        source_bucket, item.key, dest_path))
+                        source_bucket, key.name, dest_path))
           raise
 
     for dirname in dirs:
@@ -431,13 +466,13 @@ class GSUtils(object):
     prefix_length = len(prefix) if prefix else 0
 
     b = self._connect_to_bucket(bucket_name=bucket)
-    lister = BucketListResultSet(bucket=b, prefix=prefix, delimiter='/')
+    items = BucketListResultSet(bucket=b, prefix=prefix, delimiter='/')
     dirs = []
     files = []
-    for item in lister:
+    for item in items:
       t = type(item)
       if t is Key:
-        files.append(item.key[prefix_length:])
+        files.append(item.name[prefix_length:])
       elif t is Prefix:
         dirs.append(item.name[prefix_length:-1])
     return (dirs, files)
@@ -500,3 +535,14 @@ def _makedirs_if_needed(path):
   except OSError as e:
     if e.errno != errno.EEXIST:
       raise
+
+
+def _get_local_md5(path):
+  """Returns the MD5 hash of a file on local disk."""
+  hasher = hashlib.md5()
+  with open(path, 'rb') as f:
+    while True:
+      data = f.read(64*1024)
+      if not data:
+        return hasher.hexdigest()
+      hasher.update(data)

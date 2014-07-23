@@ -12,6 +12,7 @@ import random
 import shutil
 import sys
 import tempfile
+import time
 
 # Local imports.
 import gs_utils
@@ -43,6 +44,63 @@ def _test_public_read():
   gs = gs_utils.GSUtils()
   gs.list_bucket_contents(bucket=TEST_BUCKET, subdir=None)
 
+
+def _test_only_if_modified():
+  """Test only_if_modified param within upload_file()."""
+  gs = _get_authenticated_gs_handle()
+  filename = 'filename'
+  remote_dir = _get_unique_posix_dir()
+  dest_path = posixpath.join(remote_dir, filename)
+  local_dir = tempfile.mkdtemp()
+  try:
+    # Create a file on local disk, and upload it for the first time.
+    local_path = os.path.join(local_dir, filename)
+    with open(local_path, 'w') as f:
+      f.write('original contents')
+    gs.upload_file(source_path=local_path, dest_bucket=TEST_BUCKET,
+                   dest_path=dest_path, only_if_modified=True)
+    try:
+      # Re-upload the same file one second later, with only_if_modified=False;
+      # the timestamp should change.
+      old_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=dest_path)
+      time.sleep(2)
+      gs.upload_file(source_path=local_path, dest_bucket=TEST_BUCKET,
+                     dest_path=dest_path, only_if_modified=False)
+      new_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=dest_path)
+      assert old_timestamp != new_timestamp, '%s != %s' % (
+          old_timestamp, new_timestamp)
+
+      # Re-upload the same file one second later, with only_if_modified=True;
+      # the timestamp should NOT change.
+      old_timestamp = new_timestamp
+      time.sleep(2)
+      gs.upload_file(source_path=local_path, dest_bucket=TEST_BUCKET,
+                     dest_path=dest_path, only_if_modified=True)
+      new_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=dest_path)
+      assert old_timestamp == new_timestamp, '%s == %s' % (
+          old_timestamp, new_timestamp)
+
+      # MODIFY and re-upload the file one second later, with
+      # only_if_modified=True; the timestamp SHOULD change.
+      old_timestamp = new_timestamp
+      with open(local_path, 'w') as f:
+        f.write('modified contents')
+      time.sleep(2)
+      gs.upload_file(source_path=local_path, dest_bucket=TEST_BUCKET,
+                     dest_path=dest_path, only_if_modified=True)
+      new_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=dest_path)
+      assert old_timestamp != new_timestamp, '%s != %s' % (
+          old_timestamp, new_timestamp)
+    finally:
+      # Clean up the remote_dir.
+      gs.delete_file(bucket=TEST_BUCKET, path=dest_path)
+  finally:
+    # Clean up the local dir.
+    shutil.rmtree(local_dir)
 
 def _test_authenticated_round_trip():
   gs = _get_authenticated_gs_handle()
@@ -206,6 +264,7 @@ def _test_dir_upload_and_download():
 
 
 if __name__ == '__main__':
+  _test_only_if_modified()
   _test_public_read()
   _test_authenticated_round_trip()
   _test_dir_upload_and_download()
