@@ -101,6 +101,17 @@ class GSUtils(object):
     USER_BY_EMAIL   = acl.USER_BY_EMAIL
     USER_BY_ID      = acl.USER_BY_ID
 
+  class UploadIf:
+    """Cases in which we will upload a file.
+
+    Beware of performance tradeoffs.  E.g., if the file is small, the extra
+    round trip to check for file existence and/or checksum may take longer than
+    just uploading the file."""
+    ALWAYS = 1      # always upload the file
+    IF_NEW = 2      # if there is an existing file with the same name,
+                    # leave it alone
+    IF_MODIFIED = 3 # if there is an existing file with the same name and
+                    # contents, leave it alone
 
   def __init__(self, boto_file_path=None):
     """Constructor.
@@ -139,7 +150,7 @@ class GSUtils(object):
       bucket: GS bucket to delete a file from
       path: full path (Posix-style) of the file within the bucket to delete
     """
-    b = self._connect_to_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket=bucket)
     key = Key(b)
     key.name = path
     try:
@@ -159,7 +170,7 @@ class GSUtils(object):
     Returns the last modified time, as a freeform string.  If the file was not
     found, returns None.
     """
-    b = self._connect_to_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket=bucket)
     try:
       key = b.get_key(key_name=path)
       if not key:
@@ -172,38 +183,48 @@ class GSUtils(object):
       raise
 
   def upload_file(self, source_path, dest_bucket, dest_path,
-                  only_if_modified=False, predefined_acl=None,
+                  upload_if=UploadIf.ALWAYS,
+                  predefined_acl=None,
                   fine_grained_acl_list=None):
     """Upload contents of a local file to Google Storage.
 
     params:
       source_path: full path (local-OS-style) on local disk to read from
-      dest_bucket: GCS bucket to copy the file to
+      dest_bucket: GS bucket to copy the file to
       dest_path: full path (Posix-style) within that bucket
-      only_if_modified: if True, only upload the file if it would actually
-          change the content on Google Storage (uploads the file if dest_path
-          does not exist, or if it exists but has different contents than
-          source_path).  Note that this may take longer than just uploading the
-          file without checking first, due to extra round-trips!
+      upload_if: one of the UploadIf values, describing in which cases we should
+          upload the file
       predefined_acl: which predefined ACL to apply to the file on Google
           Storage; must be one of the PredefinedACL values defined above.
           If None, inherits dest_bucket's default object ACL.
-          TODO(epoger): add unittests for this param, although it seems to work
-          in my manual testing
       fine_grained_acl_list: list of (id_type, id_value, permission) tuples
           to apply to the uploaded file (on top of the predefined_acl),
           or None if predefined_acl is sufficient
-    """
-    b = self._connect_to_bucket(bucket_name=dest_bucket)
 
-    if only_if_modified:
+    TODO(epoger): Consider adding a do_compress parameter that would compress
+    the file using gzip before upload, and add a "Content-Encoding:gzip" header
+    so that HTTP downloads of the file would be unzipped automatically.
+    See https://developers.google.com/storage/docs/gsutil/addlhelp/
+        WorkingWithObjectMetadata#content-encoding
+    """
+    b = self._connect_to_bucket(bucket=dest_bucket)
+
+    if upload_if == self.UploadIf.IF_NEW:
+      old_key = b.get_key(key_name=dest_path)
+      if old_key:
+        print 'Skipping upload of existing file gs://%s/%s' % (
+            dest_bucket, dest_path)
+        return
+    elif upload_if == self.UploadIf.IF_MODIFIED:
       old_key = b.get_key(key_name=dest_path)
       if old_key:
         local_md5 = '"%s"' % _get_local_md5(path=source_path)
         if local_md5 == old_key.etag:
-          print 'Skipping upload of unmodified file %s : %s' % (
-              source_path, local_md5)
+          print 'Skipping upload of unmodified file gs://%s/%s : %s' % (
+              dest_bucket, dest_path, local_md5)
           return
+    elif upload_if != self.UploadIf.ALWAYS:
+      raise Exception('unknown value of upload_if: %s' % upload_if)
 
     key = Key(b)
     key.name = dest_path
@@ -215,49 +236,30 @@ class GSUtils(object):
                 ' while uploading source_path=%s to bucket=%s, path=%s' % (
                     source_path, dest_bucket, key.name))
       raise
-    # TODO(epoger): This may be inefficient, because it calls
-    # _connect_to_bucket() again.  Depending on how expensive that
-    # call is, we may want to optimize this.
     for (id_type, id_value, permission) in fine_grained_acl_list or []:
       self.set_acl(
-          bucket=dest_bucket, path=key.name,
+          bucket=b, path=key.name,
           id_type=id_type, id_value=id_value, permission=permission)
 
-  def upload_dir_contents(self, source_dir, dest_bucket, dest_dir,
-                          predefined_acl=None, fine_grained_acl_list=None):
+  def upload_dir_contents(self, source_dir, dest_bucket, dest_dir, **kwargs):
     """Recursively upload contents of a local directory to Google Storage.
 
     params:
       source_dir: full path (local-OS-style) on local disk of directory to copy
           contents of
-      dest_bucket: GCS bucket to copy the files into
+      dest_bucket: GS bucket to copy the files into
       dest_dir: full path (Posix-style) within that bucket; write the files into
           this directory.  If None, write into the root directory of the bucket.
-      predefined_acl: which predefined ACL to apply to the files on Google
-          Storage; must be one of the PredefinedACL values defined above.
-          If None, inherits dest_bucket's default object ACL.
-          TODO(epoger): add unittests for this param, although it seems to work
-          in my manual testing
-      fine_grained_acl_list: list of (id_type, id_value, permission) tuples
-          to apply to every file uploaded (on top of the predefined_acl),
-          or None if predefined_acl is sufficient
+      kwargs: any additional keyword arguments "inherited" from upload_file()
 
-    The copy operates as a "merge with overwrite": any files in source_dir will
-    be "overlaid" on top of the existing content in dest_dir.  Existing files
-    with the same names will be overwritten.
+    The copy operates as a merge: any files in source_dir will be "overlaid" on
+    top of the existing content in dest_dir.  Existing files with the same names
+    may or may not be overwritten, depending on the value of the upload_if kwarg
+    inherited from upload_file().
 
     TODO(epoger): Upload multiple files simultaneously to reduce latency.
-
-    TODO(epoger): Add a "noclobber" mode that will not upload any files would
-    overwrite existing files in Google Storage.
-
-    TODO(epoger): Consider adding a do_compress parameter that would compress
-    the file using gzip before upload, and add a "Content-Encoding:gzip" header
-    so that HTTP downloads of the file would be unzipped automatically.
-    See https://developers.google.com/storage/docs/gsutil/addlhelp/
-        WorkingWithObjectMetadata#content-encoding
     """
-    b = self._connect_to_bucket(bucket_name=dest_bucket)
+    b = self._connect_to_bucket(bucket=dest_bucket)
     for filename in sorted(os.listdir(source_dir)):
       local_path = os.path.join(source_dir, filename)
       if dest_dir:
@@ -267,41 +269,25 @@ class GSUtils(object):
 
       if os.path.isdir(local_path):
         self.upload_dir_contents(  # recurse
-            source_dir=local_path, dest_bucket=dest_bucket,
-            dest_dir=remote_path,
-            predefined_acl=predefined_acl,
-            fine_grained_acl_list=fine_grained_acl_list)
+            source_dir=local_path, dest_bucket=b, dest_dir=remote_path,
+            **kwargs)
       else:
-        key = Key(b)
-        key.name = remote_path
-        try:
-          key.set_contents_from_filename(
-              filename=local_path, policy=predefined_acl)
-        except BotoServerError, e:
-          e.body = (repr(e.body) +
-                    ' while uploading local_path=%s to bucket=%s, path=%s' % (
-                        local_path, dest_bucket, remote_path))
-          raise
-        # TODO(epoger): This may be inefficient, because it calls
-        # _connect_to_bucket() for every file.  Depending on how expensive that
-        # call is, we may want to optimize this.
-        for (id_type, id_value, permission) in fine_grained_acl_list or []:
-          self.set_acl(
-              bucket=dest_bucket, path=remote_path,
-              id_type=id_type, id_value=id_value, permission=permission)
+        self.upload_file(
+            source_path=local_path, dest_bucket=b, dest_path=remote_path,
+            **kwargs)
 
   def download_file(self, source_bucket, source_path, dest_path,
                     create_subdirs_if_needed=False):
     """Downloads a single file from Google Cloud Storage to local disk.
 
     Args:
-      source_bucket: GCS bucket to download the file from
+      source_bucket: GS bucket to download the file from
       source_path: full path (Posix-style) within that bucket
       dest_path: full path (local-OS-style) on local disk to copy the file to
       create_subdirs_if_needed: boolean; whether to create subdirectories as
           needed to create dest_path
     """
-    b = self._connect_to_bucket(bucket_name=source_bucket)
+    b = self._connect_to_bucket(bucket=source_bucket)
     key = Key(b)
     key.name = source_path
     if create_subdirs_if_needed:
@@ -319,7 +305,7 @@ class GSUtils(object):
     """Recursively download contents of a Google Storage directory to local disk
 
     params:
-      source_bucket: GCS bucket to copy the files from
+      source_bucket: GS bucket to copy the files from
       source_dir: full path (Posix-style) within that bucket; read the files
           from this directory
       dest_dir: full path (local-OS-style) on local disk of directory to copy
@@ -332,7 +318,7 @@ class GSUtils(object):
     TODO(epoger): Download multiple files simultaneously to reduce latency.
     """
     _makedirs_if_needed(dest_dir)
-    b = self._connect_to_bucket(bucket_name=source_bucket)
+    b = self._connect_to_bucket(bucket=source_bucket)
     (dirs, files) = self.list_bucket_contents(
         bucket=source_bucket, subdir=source_dir)
 
@@ -378,7 +364,7 @@ class GSUtils(object):
         permissions have been set.
     """
     field = self._field_by_id_type[id_type]
-    b = self._connect_to_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket=bucket)
     acls = b.get_acl(key_name=path)
     matching_entries = [entry for entry in acls.entries.entry_list
                         if (entry.scope.type == id_type) and
@@ -427,7 +413,7 @@ class GSUtils(object):
       assert Permission.WRITE == get_acl(bucket, path, id_type, id_value)
     """
     field = self._field_by_id_type[id_type]
-    b = self._connect_to_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket=bucket)
     acls = b.get_acl(key_name=path)
 
     # Remove any existing entries that refer to the same id_type/id_value,
@@ -465,7 +451,7 @@ class GSUtils(object):
       prefix += '/'
     prefix_length = len(prefix) if prefix else 0
 
-    b = self._connect_to_bucket(bucket_name=bucket)
+    b = self._connect_to_bucket(bucket=bucket)
     items = BucketListResultSet(bucket=b, prefix=prefix, delimiter='/')
     dirs = []
     files = []
@@ -477,16 +463,19 @@ class GSUtils(object):
         dirs.append(item.name[prefix_length:-1])
     return (dirs, files)
 
-  def _connect_to_bucket(self, bucket_name):
+  def _connect_to_bucket(self, bucket):
     """Returns a Bucket object we can use to access a particular bucket in GS.
 
     Params:
-      bucket_name: name of the bucket (e.g., 'chromium-skia-gm')
+      bucket: name of the bucket (e.g., 'chromium-skia-gm'), or a Bucket
+          object (in which case this param is just returned as-is)
     """
+    if type(bucket) is Bucket:
+      return bucket
     try:
-      return self._create_connection().get_bucket(bucket_name=bucket_name)
+      return self._create_connection().get_bucket(bucket_name=bucket)
     except BotoServerError, e:
-      e.body = repr(e.body) + ' while connecting to bucket=%s' % bucket_name
+      e.body = repr(e.body) + ' while connecting to bucket=%s' % bucket
       raise
 
   def _create_connection(self):
