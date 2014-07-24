@@ -106,7 +106,10 @@ class GSUtils(object):
 
     Beware of performance tradeoffs.  E.g., if the file is small, the extra
     round trip to check for file existence and/or checksum may take longer than
-    just uploading the file."""
+    just uploading the file.
+    See http://skbug.com/2778 ('gs_utils: when uploading IF_NEW, batch up
+    checks for existing files within a single remote directory')
+    """
     ALWAYS = 1      # always upload the file
     IF_NEW = 2      # if there is an existing file with the same name,
                     # leave it alone
@@ -157,7 +160,7 @@ class GSUtils(object):
       key.delete()
     except BotoServerError, e:
       e.body = (repr(e.body) +
-                ' while deleting bucket=%s, path=%s' % (bucket, path))
+                ' while deleting bucket=%s, path=%s' % (b.name, path))
       raise
 
   def get_last_modified_time(self, bucket, path):
@@ -179,7 +182,7 @@ class GSUtils(object):
     except BotoServerError, e:
       e.body = (repr(e.body) +
                 ' while getting attributes of bucket=%s, path=%s' % (
-                    bucket, path))
+                    b.name, path))
       raise
 
   def upload_file(self, source_path, dest_bucket, dest_path,
@@ -213,7 +216,7 @@ class GSUtils(object):
       old_key = b.get_key(key_name=dest_path)
       if old_key:
         print 'Skipping upload of existing file gs://%s/%s' % (
-            dest_bucket, dest_path)
+            b.name, dest_path)
         return
     elif upload_if == self.UploadIf.IF_MODIFIED:
       old_key = b.get_key(key_name=dest_path)
@@ -221,7 +224,7 @@ class GSUtils(object):
         local_md5 = '"%s"' % _get_local_md5(path=source_path)
         if local_md5 == old_key.etag:
           print 'Skipping upload of unmodified file gs://%s/%s : %s' % (
-              dest_bucket, dest_path, local_md5)
+              b.name, dest_path, local_md5)
           return
     elif upload_if != self.UploadIf.ALWAYS:
       raise Exception('unknown value of upload_if: %s' % upload_if)
@@ -234,7 +237,7 @@ class GSUtils(object):
     except BotoServerError, e:
       e.body = (repr(e.body) +
                 ' while uploading source_path=%s to bucket=%s, path=%s' % (
-                    source_path, dest_bucket, key.name))
+                    source_path, b.name, key.name))
       raise
     for (id_type, id_value, permission) in fine_grained_acl_list or []:
       self.set_acl(
@@ -258,6 +261,9 @@ class GSUtils(object):
     inherited from upload_file().
 
     TODO(epoger): Upload multiple files simultaneously to reduce latency.
+
+    TODO(epoger): When upload_if==IF_NEW, batch up checks for existing files
+    within a single remote directory. See http://skbug.com/2778
     """
     b = self._connect_to_bucket(bucket=dest_bucket)
     for filename in sorted(os.listdir(source_dir)):
@@ -298,7 +304,7 @@ class GSUtils(object):
       except BotoServerError, e:
         e.body = (repr(e.body) +
                   ' while downloading bucket=%s, path=%s to local_path=%s' % (
-                      source_bucket, source_path, dest_path))
+                      b.name, source_path, dest_path))
         raise
 
   def download_dir_contents(self, source_bucket, source_dir, dest_dir):
@@ -332,7 +338,7 @@ class GSUtils(object):
         except BotoServerError, e:
           e.body = (repr(e.body) +
                     ' while downloading bucket=%s, path=%s to local_path=%s' % (
-                        source_bucket, key.name, dest_path))
+                        b.name, key.name, dest_path))
           raise
 
     for dirname in dirs:
