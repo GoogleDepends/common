@@ -160,7 +160,7 @@ class GSUtils(object):
       key.delete()
     except BotoServerError, e:
       e.body = (repr(e.body) +
-                ' while deleting bucket=%s, path=%s' % (b.name, path))
+                ' while deleting gs://%s/%s' % (b.name, path))
       raise
 
   def get_last_modified_time(self, bucket, path):
@@ -181,8 +181,7 @@ class GSUtils(object):
       return key.last_modified
     except BotoServerError, e:
       e.body = (repr(e.body) +
-                ' while getting attributes of bucket=%s, path=%s' % (
-                    b.name, path))
+                ' while getting attributes of gs://%s/%s' % (b.name, path))
       raise
 
   def upload_file(self, source_path, dest_bucket, dest_path,
@@ -211,6 +210,7 @@ class GSUtils(object):
         WorkingWithObjectMetadata#content-encoding
     """
     b = self._connect_to_bucket(bucket=dest_bucket)
+    local_md5 = None  # filled in lazily
 
     if upload_if == self.UploadIf.IF_NEW:
       old_key = b.get_key(key_name=dest_path)
@@ -221,27 +221,62 @@ class GSUtils(object):
     elif upload_if == self.UploadIf.IF_MODIFIED:
       old_key = b.get_key(key_name=dest_path)
       if old_key:
-        local_md5 = '"%s"' % _get_local_md5(path=source_path)
-        if local_md5 == old_key.etag:
+        if not local_md5:
+          local_md5 = _get_local_md5(path=source_path)
+        if ('"%s"' % local_md5) == old_key.etag:
           print 'Skipping upload of unmodified file gs://%s/%s : %s' % (
               b.name, dest_path, local_md5)
           return
     elif upload_if != self.UploadIf.ALWAYS:
       raise Exception('unknown value of upload_if: %s' % upload_if)
 
-    key = Key(b)
-    key.name = dest_path
+    # Upload the file using a temporary name at first, in case the transfer
+    # is interrupted partway through.
+    if not local_md5:
+      local_md5 = _get_local_md5(path=source_path)
+    initial_key = Key(b)
+    initial_key.name = dest_path + '-uploading-' + local_md5
     try:
-      key.set_contents_from_filename(filename=source_path,
-                                     policy=predefined_acl)
+      initial_key.set_contents_from_filename(filename=source_path,
+                                             policy=predefined_acl)
     except BotoServerError, e:
       e.body = (repr(e.body) +
-                ' while uploading source_path=%s to bucket=%s, path=%s' % (
-                    source_path, b.name, key.name))
+                ' while uploading source_path=%s to gs://%s/%s' % (
+                    source_path, b.name, initial_key.name))
       raise
+
+    # Verify that the file contents were uploaded successfully.
+    #
+    # TODO(epoger): Check whether the boto library or XML API already do this...
+    # if so, we may be duplicating effort here, and maybe we don't need to do
+    # the whole "upload using temporary filename, then rename" thing.
+    #
+    # TODO(epoger): Confirm that the etag is set on the server side...
+    # otherwise, we may just be validating another MD5 hash that was generated
+    # on the client side before the file was uploaded!
+    validate_key = b.get_key(key_name=initial_key.name)
+    if validate_key.etag != ('"%s"' % local_md5):
+      raise Exception('found wrong MD5 after uploading gs://%s/%s' % (
+          b.name, validate_key.name))
+
+    # Rename the file to its real name.
+    #
+    # TODO(epoger): I don't know how long this takes.  I wish we could rename
+    # the key instead, but AFAICT you can't do that.
+    # Perhaps we could use Key.compose() to create a composite object pointing
+    # at the original key?
+    # See https://developers.google.com/storage/docs/composite-objects
+    final_key = b.copy_key(
+        new_key_name=dest_path, src_key_name=initial_key.name,
+        src_bucket_name=b.name, preserve_acl=False)
+    initial_key.delete()
+
+    # Set ACLs on the file.
+    # We do this *after* copy_key(), because copy_key's preserve_acl
+    # functionality would incur a performance hit.
     for (id_type, id_value, permission) in fine_grained_acl_list or []:
       self.set_acl(
-          bucket=b, path=key.name,
+          bucket=b, path=final_key.name,
           id_type=id_type, id_value=id_value, permission=permission)
 
   def upload_dir_contents(self, source_dir, dest_bucket, dest_dir,
@@ -337,7 +372,7 @@ class GSUtils(object):
         key.get_contents_to_file(fp=f)
       except BotoServerError, e:
         e.body = (repr(e.body) +
-                  ' while downloading bucket=%s, path=%s to local_path=%s' % (
+                  ' while downloading gs://%s/%s to local_path=%s' % (
                       b.name, source_path, dest_path))
         raise
 
@@ -371,7 +406,7 @@ class GSUtils(object):
           key.get_contents_to_file(fp=f)
         except BotoServerError, e:
           e.body = (repr(e.body) +
-                    ' while downloading bucket=%s, path=%s to local_path=%s' % (
+                    ' while downloading gs://%s/%s to local_path=%s' % (
                         b.name, key.name, dest_path))
           raise
 
