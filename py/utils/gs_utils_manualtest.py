@@ -45,7 +45,7 @@ def _test_public_read():
   gs.list_bucket_contents(bucket=TEST_BUCKET, subdir=None)
 
 
-def _test_upload_if():
+def _test_upload_if_one_file():
   """Test upload_if param within upload_file()."""
   gs = _get_authenticated_gs_handle()
   filename = 'filename'
@@ -112,6 +112,86 @@ def _test_upload_if():
   finally:
     # Clean up the local dir.
     shutil.rmtree(local_dir)
+
+
+def _test_upload_if_multiple_files():
+  """Test upload_if param within upload_dir_contents()."""
+  gs = _get_authenticated_gs_handle()
+  subdir = 'subdir'
+  filenames = ['file1', 'file2']
+  local_dir = tempfile.mkdtemp()
+  remote_dir = _get_unique_posix_dir()
+  sample_file_local_path = os.path.join(local_dir, subdir, filenames[0])
+  sample_file_remote_path = posixpath.join(remote_dir, subdir, filenames[0])
+  try:
+    # Create files on local disk, and upload them for the first time.
+    os.mkdir(os.path.join(local_dir, subdir))
+    for filename in filenames:
+      with open(os.path.join(local_dir, subdir, filename), 'w') as f:
+        f.write('original contents of %s' % filename)
+    gs.upload_dir_contents(
+        source_dir=local_dir, dest_bucket=TEST_BUCKET,
+        dest_dir=remote_dir, upload_if=gs.UploadIf.IF_NEW)
+    try:
+      # Re-upload the same files, with upload_if=gs.UploadIf.ALWAYS;
+      # the timestamps should change.
+      old_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=sample_file_remote_path)
+      time.sleep(2)
+      gs.upload_dir_contents(
+          source_dir=local_dir, dest_bucket=TEST_BUCKET,
+          dest_dir=remote_dir, upload_if=gs.UploadIf.ALWAYS)
+      new_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=sample_file_remote_path)
+      assert old_timestamp != new_timestamp, '%s != %s' % (
+          old_timestamp, new_timestamp)
+
+      # Re-upload the same files, with upload_if=gs.UploadIf.IF_MODIFIED;
+      # the timestamps should NOT change.
+      old_timestamp = new_timestamp
+      time.sleep(2)
+      gs.upload_dir_contents(
+          source_dir=local_dir, dest_bucket=TEST_BUCKET,
+          dest_dir=remote_dir, upload_if=gs.UploadIf.IF_MODIFIED)
+      new_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=sample_file_remote_path)
+      assert old_timestamp == new_timestamp, '%s == %s' % (
+          old_timestamp, new_timestamp)
+
+      # Modify and re-upload the files, with upload_if=gs.UploadIf.IF_NEW;
+      # the timestamps should still not change.
+      old_timestamp = new_timestamp
+      with open(sample_file_local_path, 'w') as f:
+        f.write('modified contents of sample file')
+      time.sleep(2)
+      gs.upload_dir_contents(
+          source_dir=local_dir, dest_bucket=TEST_BUCKET,
+          dest_dir=remote_dir, upload_if=gs.UploadIf.IF_NEW)
+      new_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=sample_file_remote_path)
+      assert old_timestamp == new_timestamp, '%s == %s' % (
+          old_timestamp, new_timestamp)
+
+      # Re-upload the modified file, with upload_if=gs.UploadIf.IF_MODIFIED;
+      # now the timestamp SHOULD change.
+      old_timestamp = new_timestamp
+      time.sleep(2)
+      gs.upload_dir_contents(
+          source_dir=local_dir, dest_bucket=TEST_BUCKET,
+          dest_dir=remote_dir, upload_if=gs.UploadIf.IF_MODIFIED)
+      new_timestamp = gs.get_last_modified_time(
+          bucket=TEST_BUCKET, path=sample_file_remote_path)
+      assert old_timestamp != new_timestamp, '%s != %s' % (
+          old_timestamp, new_timestamp)
+    finally:
+      # Delete all the files we uploaded to Google Storage.
+      for filename in filenames:
+        gs.delete_file(bucket=TEST_BUCKET,
+                       path=posixpath.join(remote_dir, subdir, filename))
+  finally:
+    # Clean up the local dir.
+    shutil.rmtree(local_dir)
+
 
 def _test_authenticated_round_trip():
   gs = _get_authenticated_gs_handle()
@@ -275,7 +355,8 @@ def _test_dir_upload_and_download():
 
 
 if __name__ == '__main__':
-  _test_upload_if()
+  _test_upload_if_multiple_files()
+  _test_upload_if_one_file()
   _test_public_read()
   _test_authenticated_round_trip()
   _test_dir_upload_and_download()
