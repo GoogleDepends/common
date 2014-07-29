@@ -19,7 +19,6 @@ API/library references:
 # System-level imports
 import errno
 import hashlib
-import logging
 import os
 import posixpath
 import Queue
@@ -126,24 +125,21 @@ class GSUtils(object):
     IF_MODIFIED = 3 # if there is an existing file with the same name and
                     # contents, leave it alone
 
-  def __init__(self, boto_file_path=None, logger=None):
+  def __init__(self, boto_file_path=None):
     """Constructor.
 
     Params:
       boto_file_path: full path (local-OS-style) on local disk where .boto
           credentials file can be found.  If None, then the GSUtils object
           created will be able to access only public files in Google Storage.
-      logger: a logging.Logger instance to use for logging output; if None,
-          one will be created with default characteristics
 
     Raises an exception if no file is found at boto_file_path, or if the file
     found there is malformed.
     """
-    self.logger = logger or logging.getLogger(__name__)
     self._gs_access_key_id = None
     self._gs_secret_access_key = None
     if boto_file_path:
-      self.logger.info('Reading boto file from %s' % boto_file_path)
+      print ('Reading boto file from %s' % boto_file_path)
       boto_dict = _config_file_as_dict(filepath=boto_file_path)
       self._gs_access_key_id = boto_dict['gs_access_key_id']
       self._gs_secret_access_key = boto_dict['gs_secret_access_key']
@@ -228,7 +224,7 @@ class GSUtils(object):
     if upload_if == self.UploadIf.IF_NEW:
       old_key = b.get_key(key_name=dest_path)
       if old_key:
-        self.logger.info('Skipping upload of existing file gs://%s/%s' % (
+        print ('Skipping upload of existing file gs://%s/%s' % (
             b.name, dest_path))
         return
     elif upload_if == self.UploadIf.IF_MODIFIED:
@@ -237,7 +233,7 @@ class GSUtils(object):
         if not local_md5:
           local_md5 = _get_local_md5(path=source_path)
         if ('"%s"' % local_md5) == old_key.etag:
-          self.logger.info(
+          print (
               'Skipping upload of unmodified file gs://%s/%s : %s' % (
                   b.name, dest_path, local_md5))
           return
@@ -361,7 +357,7 @@ class GSUtils(object):
 
     # Upload any files still in source_fileset.
     num_files_to_upload = len(source_fileset)
-    self.logger.info('Uploading %d files, skipping %d ...' % (
+    print ('Uploading %d files, skipping %d ...' % (
         num_files_to_upload, num_files_total - num_files_to_upload))
     if num_files_to_upload == 0:
       return
@@ -380,7 +376,7 @@ class GSUtils(object):
           rel_path = q.get(block=False)
         except Queue.Empty:
           return  # no more tasks in the queue, so exit
-        self.logger.info(' Uploading file %d/%d: %s' % (
+        print (' Uploading file %d/%d: %s' % (
             num_files_to_upload - q.qsize(), num_files_to_upload, rel_path))
         self.upload_file(
             source_path=os.path.join(source_dir, rel_path),

@@ -6,7 +6,6 @@ TODO(epoger): How should we exercise these self-tests? See http://skbug.com/2751
 """
 
 # System-level imports.
-import logging
 import os
 import posixpath
 import random
@@ -356,7 +355,6 @@ def _test_dir_upload_and_download():
 
 
 if __name__ == '__main__':
-  logging.basicConfig(level=logging.INFO)
   _test_upload_if_multiple_files()
   _test_upload_if_one_file()
   _test_public_read()
