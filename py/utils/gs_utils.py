@@ -52,6 +52,8 @@ from boto.s3.prefix import Prefix
 # each core sits idle waiting for network I/O to complete.
 DEFAULT_UPLOAD_THREADS = 10
 
+_GS_PREFIX = 'gs://'
+
 
 class AnonymousGSConnection(GSConnection):
   """GSConnection class that allows anonymous connections.
@@ -579,6 +581,34 @@ class GSUtils(object):
       elif t is Prefix:
         dirs.append(item.name[prefix_length:-1])
     return (dirs, files)
+
+  @staticmethod
+  def is_gs_url(url):
+    """Returns True if url is a legal Google Storage URL ("gs://bucket/file").
+    """
+    try:
+      if url.lower().startswith(_GS_PREFIX) and len(url) > len(_GS_PREFIX):
+        return url[len(_GS_PREFIX)].isalnum()
+      else:
+        return False
+    except AttributeError:
+      return False
+
+  @staticmethod
+  def split_gs_url(url):
+    """Returns (bucket, filepath) corresponding to a legal Google Storage URL.
+
+    Raises AttributeError if the input URL is not a legal Google Storage URL.
+    """
+    if not GSUtils.is_gs_url(url):
+      raise AttributeError('"%s" is not a legal Google Storage URL' % url)
+    prefix_removed = url[len(_GS_PREFIX):]
+    pathsep_index = prefix_removed.find('/')
+    if pathsep_index < 0:
+      return (prefix_removed, '')
+    else:
+      return (prefix_removed[:pathsep_index],
+              prefix_removed[pathsep_index+1:].strip('/'))
 
   def _connect_to_bucket(self, bucket):
     """Returns a Bucket object we can use to access a particular bucket in GS.

@@ -39,6 +39,40 @@ def _get_unique_posix_dir():
   return 'gs_utils_manualtest/%d' % random.randint(0, sys.maxint)
 
 
+def _test_static_methods():
+  """Test all static methods."""
+  gs = gs_utils.GSUtils
+
+  # (input url,  output bucket, output path) for each test case
+  testcases = [
+      (None,  None, None),
+      (5,  None, None),
+      ('',  None, None),
+      ('/one/two',  None, None),
+      ('http://one/two',  None, None),
+      ('gs:',  None, None),
+      ('gs://',  None, None),
+      ('gs:///',  None, None),
+      ('gs://???',  None, None),
+      ('gs:///bucket',  None, None),
+      ('gs://bucket',  'bucket', ''),
+      ('GS://bucket/',  'bucket', ''),
+      ('gs://bucket//',  'bucket', ''),
+      ('gs://bucket/path1',  'bucket', 'path1'),
+      ('gs://bucket/path1/path2',  'bucket', 'path1/path2'),
+      ('gs://bucket/path1/path2/',  'bucket', 'path1/path2'),
+      ('gs://bucket///path1/path2///',  'bucket', 'path1/path2'),
+      ('gs://bucket///path1//path2///',  'bucket', 'path1//path2'),
+  ]
+  for (url, bucket, path) in testcases:
+    is_legal_url = (bucket != None)
+    assert gs.is_gs_url(url) == is_legal_url, 'gs.is_gs_url("%s") == %s' % (
+        url, is_legal_url)
+    if is_legal_url:
+      assert gs.split_gs_url(url) == (bucket, path), (
+          'gs.split_gs_url("%s") == ("%s", "%s")' % (url, bucket, path))
+
+
 def _test_public_read():
   """Make sure we can read from public files without .boto file credentials."""
   gs = gs_utils.GSUtils()
@@ -355,6 +389,7 @@ def _test_dir_upload_and_download():
 
 
 if __name__ == '__main__':
+  _test_static_methods()
   _test_upload_if_multiple_files()
   _test_upload_if_one_file()
   _test_public_read()
