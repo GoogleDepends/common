@@ -5,9 +5,12 @@
 
 """This module contains functions for using git."""
 
-
+import os
 import re
 import shell_utils
+import shutil
+import subprocess
+import tempfile
 
 
 def _FindGit():
@@ -144,3 +147,79 @@ class GitBranch(object):
         shell_utils.run([GIT, 'checkout', 'master'])
         if self._delete_when_finished:
           shell_utils.run([GIT, 'branch', '-D', self._branch_name])
+
+
+class NewGitCheckout(object):
+  """Creates a new local checkout of a Git repository."""
+
+  def __init__(self, repository, refspec=None, subdir=None,
+               containing_dir=None):
+    """Check out a new local copy of the repository.
+
+    Because this is a new checkout, rather than a reference to an existing
+    checkout on disk, it is safe to assume that the calling thread is the
+    only thread manipulating the checkout.
+
+    You can use the 'with' statement to create this object in such a way that
+    it cleans up after itself:
+
+    with NewGitCheckout(*args) as checkout:
+      # use checkout instance
+    # the checkout is automatically cleaned up here
+
+    Args:
+      repository: name of the remote repository
+      refspec: an arbitrary remote ref (e.g., the name of a branch);
+          if None, allow the git command to pick a default
+      subdir: if specified, the caller only wants access to files within this
+          subdir in the repository.
+          For now, we check out the entire repository regardless of this param,
+          and just hide the rest of the repository; but later on we may
+          optimize performance by only checking out this part of the repo.
+      containing_dir: if specified, the new checkout will be created somewhere
+          within this directory; otherwise, a system-dependent default location
+          will be used, as determined by tempfile.mkdtemp()
+    """
+    # _git_root points to the tree holding the git checkout in its entirety;
+    # _file_root points to the files the caller wants to look at
+    self._git_root = tempfile.mkdtemp(dir=containing_dir)
+    if subdir:
+      self._file_root = os.path.join(self._git_root, subdir)
+    else:
+      self._file_root = self._git_root
+
+    pull_cmd = [GIT, 'pull', repository]
+    if refspec:
+      pull_cmd.append(refspec)
+    self._run_in_git_root(args=[GIT, 'init'])
+    self._run_in_git_root(args=pull_cmd)
+
+  @property
+  def root(self):
+    """Returns the root directory containing the checked-out files.
+
+    If you specified the subdir parameter in the constructor, this directory
+    will point at just the subdir you requested.
+    """
+    return self._file_root
+
+  def commithash(self):
+    """Returns the commithash of the local checkout."""
+    return self._run_in_git_root(
+        args=[GIT, 'rev-parse', 'HEAD']).strip()
+
+  def __enter__(self):
+    return self
+
+  # pylint: disable=W0622
+  def __exit__(self, type, value, traceback):
+    shutil.rmtree(self._git_root)
+
+  def _run_in_git_root(self, args):
+    """Run an external command with cwd set to self._git_root.
+
+    Returns the command's output as a byte string.
+
+    Raises an Exception if the command fails.
+    """
+    return subprocess.check_output(args=args, cwd=self._git_root)
