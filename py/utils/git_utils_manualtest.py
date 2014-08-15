@@ -99,5 +99,6 @@ def main(test_case_class):
   if not results.wasSuccessful():
     raise Exception('failed unittest %s' % test_case_class)
 
+
 if __name__ == '__main__':
   main(NewGitCheckoutTest)
