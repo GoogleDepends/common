@@ -152,25 +152,28 @@ class GitBranch(object):
 class NewGitCheckout(object):
   """Creates a new local checkout of a Git repository."""
 
-  def __init__(self, repository, refspec=None, subdir=None,
-               containing_dir=None):
-    """Check out a new local copy of the repository.
+  def __init__(self, repository, refspec=None, commit='HEAD',
+               subdir=None, containing_dir=None):
+    """Set parameters for this local copy of a Git repository.
 
     Because this is a new checkout, rather than a reference to an existing
     checkout on disk, it is safe to assume that the calling thread is the
     only thread manipulating the checkout.
 
-    You can use the 'with' statement to create this object in such a way that
-    it cleans up after itself:
+    You must use the 'with' statement to create this object:
 
     with NewGitCheckout(*args) as checkout:
       # use checkout instance
     # the checkout is automatically cleaned up here
 
     Args:
-      repository: name of the remote repository
-      refspec: an arbitrary remote ref (e.g., the name of a branch);
-          if None, allow the git command to pick a default
+      repository: URL of the remote repository (e.g.,
+          'https://skia.googlesource.com/common') or path to a local repository
+          (e.g., '/path/to/repo/.git') to check out a copy of
+      refspec: which refs (e.g., a branch name) to fetch from the repository;
+          if None, git-fetch will choose the default refs to fetch
+      commit: commit hash, branch, or tag within refspec, indicating what point
+          to update the local checkout to
       subdir: if specified, the caller only wants access to files within this
           subdir in the repository.
           For now, we check out the entire repository regardless of this param,
@@ -180,19 +183,14 @@ class NewGitCheckout(object):
           within this directory; otherwise, a system-dependent default location
           will be used, as determined by tempfile.mkdtemp()
     """
-    # _git_root points to the tree holding the git checkout in its entirety;
-    # _file_root points to the files the caller wants to look at
-    self._git_root = tempfile.mkdtemp(dir=containing_dir)
-    if subdir:
-      self._file_root = os.path.join(self._git_root, subdir)
-    else:
-      self._file_root = self._git_root
+    self._repository = repository
+    self._refspec = refspec
+    self._commit = commit
+    self._subdir = subdir
+    self._containing_dir = containing_dir
+    self._git_root = None
+    self._file_root = None
 
-    pull_cmd = [GIT, 'pull', repository]
-    if refspec:
-      pull_cmd.append(refspec)
-    self._run_in_git_root(args=[GIT, 'init'])
-    self._run_in_git_root(args=pull_cmd)
 
   @property
   def root(self):
@@ -209,6 +207,28 @@ class NewGitCheckout(object):
         args=[GIT, 'rev-parse', 'HEAD']).strip()
 
   def __enter__(self):
+    """Check out a new local copy of the repository.
+
+    Uses the parameters that were passed into the constructor.
+    """
+    # _git_root points to the tree holding the git checkout in its entirety;
+    # _file_root points to the files the caller wants to look at
+    self._git_root = tempfile.mkdtemp(dir=self._containing_dir)
+    if self._subdir:
+      self._file_root = os.path.join(self._git_root, self._subdir)
+    else:
+      self._file_root = self._git_root
+
+    local_branch_name = 'local'
+    self._run_in_git_root(args=[GIT, 'init'])
+    fetch_cmd = [GIT, 'fetch', self._repository]
+    if self._refspec:
+      fetch_cmd.append(self._refspec)
+    self._run_in_git_root(args=fetch_cmd)
+    self._run_in_git_root(args=[GIT, 'merge', 'FETCH_HEAD'])
+    self._run_in_git_root(args=[GIT, 'branch', local_branch_name, self._commit])
+    self._run_in_git_root(args=[GIT, 'checkout', local_branch_name])
+
     return self
 
   # pylint: disable=W0622

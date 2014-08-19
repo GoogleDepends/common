@@ -18,10 +18,12 @@ import unittest
 import git_utils
 
 
-# A git repo we can use for tests.
-REPO = 'https://skia.googlesource.com/common'
+# A git repo we can use for tests, with local and remote copies.
+LOCAL_REPO = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), os.pardir, os.pardir, '.git'))
+REMOTE_REPO = 'https://skia.googlesource.com/common'
 
-# A file in some subdirectory within REPO.
+# A file in some subdirectory within the test repo.
 REPO_FILE = os.path.join('py', 'utils', 'git_utils.py')
 
 
@@ -29,7 +31,7 @@ class NewGitCheckoutTest(unittest.TestCase):
 
   def test_defaults(self):
     """Test NewGitCheckout created using default parameters."""
-    with git_utils.NewGitCheckout(repository=REPO) as checkout:
+    with git_utils.NewGitCheckout(repository=LOCAL_REPO) as checkout:
       filepath = os.path.join(checkout.root, REPO_FILE)
       self.assertTrue(
           os.path.exists(filepath),
@@ -39,6 +41,18 @@ class NewGitCheckoutTest(unittest.TestCase):
         os.path.exists(filepath),
         'file %s should not exist' % filepath)
 
+  def test_remote(self):
+    """Test NewGitCheckout with a remote repo.
+
+    This makes requests across the network, so we may not want to run it
+    very often...
+    """
+    with git_utils.NewGitCheckout(repository=REMOTE_REPO) as checkout:
+      filepath = os.path.join(checkout.root, REPO_FILE)
+      self.assertTrue(
+          os.path.exists(filepath),
+          'file %s should exist' % filepath)
+
   def test_subdir(self):
     """Create NewGitCheckout with a specific subdirectory."""
     subdir = os.path.dirname(REPO_FILE)
@@ -46,7 +60,7 @@ class NewGitCheckoutTest(unittest.TestCase):
 
     containing_dir = tempfile.mkdtemp()
     try:
-      with git_utils.NewGitCheckout(repository=REPO, subdir=subdir,
+      with git_utils.NewGitCheckout(repository=LOCAL_REPO, subdir=subdir,
                                     containing_dir=containing_dir) as checkout:
         self.assertTrue(
             checkout.root.startswith(containing_dir),
@@ -59,8 +73,8 @@ class NewGitCheckoutTest(unittest.TestCase):
     finally:
       os.rmdir(containing_dir)
 
-  def test_refspec(self):
-    """Create NewGitCheckout with a specific refspec.
+  def test_commit(self):
+    """Create NewGitCheckout with a specific commit.
 
     This test depends on the fact that the whitespace.txt file was added to the
     repo in a particular commit.
@@ -72,7 +86,7 @@ class NewGitCheckoutTest(unittest.TestCase):
     hash_with_file = 'c2200447734f13070fb3b2808dea58847241ab0e'
 
     with git_utils.NewGitCheckout(
-        repository=REPO, refspec=hash_without_file) as checkout:
+        repository=LOCAL_REPO, commit=hash_without_file) as checkout:
       filepath = os.path.join(checkout.root, filename)
       self.assertEquals(
           hash_without_file, checkout.commithash(),
@@ -82,7 +96,7 @@ class NewGitCheckoutTest(unittest.TestCase):
           'file %s should not exist' % filepath)
 
     with git_utils.NewGitCheckout(
-        repository=REPO, refspec=hash_with_file) as checkout:
+        repository=LOCAL_REPO, commit=hash_with_file) as checkout:
       filepath = os.path.join(checkout.root, filename)
       self.assertEquals(
           hash_with_file, checkout.commithash(),
