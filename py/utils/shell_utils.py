@@ -53,7 +53,7 @@ def run_async(cmd, echo=None, shell=False):
   if echo is None:
     echo = VERBOSE
   if echo:
-    print cmd
+    print ' '.join(cmd) if isinstance(cmd, list) else cmd
   if 'nt' in os.name:
     # Windows has a bad habit of opening a dialog when a console program
     # crashes, rather than just letting it crash.  Therefore, when a program
