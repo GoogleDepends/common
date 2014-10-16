@@ -52,7 +52,7 @@ from boto.s3.prefix import Prefix
 # each core sits idle waiting for network I/O to complete.
 DEFAULT_UPLOAD_THREADS = 10
 
-_GS_PREFIX = 'gs://'
+GS_PREFIX = 'gs://'
 
 
 class AnonymousGSConnection(GSConnection):
@@ -132,19 +132,34 @@ class GSUtils(object):
 
     Params:
       boto_file_path: full path (local-OS-style) on local disk where .boto
-          credentials file can be found.  If None, then the GSUtils object
-          created will be able to access only public files in Google Storage.
+          credentials file can be found.  If None, fall back on the
+          AWS_CREDENTIAL_FILE environment variable, then look in a set of
+          common paths for the .boto file.  If no .boto file is found, then the
+          GSUtils object created will be able to access only public files in
+          Google Storage.
 
     Raises an exception if no file is found at boto_file_path, or if the file
     found there is malformed.
     """
     self._gs_access_key_id = None
     self._gs_secret_access_key = None
+    if not boto_file_path:
+      if os.environ.get('AWS_CREDENTIAL_FILE'):
+        boto_file_path = os.path.expanduser(os.environ['AWS_CREDENTIAL_FILE'])
+    if not boto_file_path:
+      for path in (os.path.join(os.path.expanduser('~'), '.boto'),):
+        if os.path.isfile(path):
+          boto_file_path = path
+          break
+
     if boto_file_path:
       print ('Reading boto file from %s' % boto_file_path)
       boto_dict = _config_file_as_dict(filepath=boto_file_path)
       self._gs_access_key_id = boto_dict['gs_access_key_id']
       self._gs_secret_access_key = boto_dict['gs_secret_access_key']
+    else:
+      print >> sys.stderr, 'Warning: no .boto file found.'
+
     # Which field we get/set in ACL entries, depending on IdType.
     self._field_by_id_type = {
         self.IdType.GROUP_BY_DOMAIN: 'domain',
@@ -582,13 +597,24 @@ class GSUtils(object):
         dirs.append(item.name[prefix_length:-1])
     return (dirs, files)
 
+  def does_storage_object_exist(self, bucket, object_name):
+    """Determines whether an object exists in Google Storage.
+
+    Returns True if it exists else returns False.
+    """
+    b = self._connect_to_bucket(bucket=bucket)
+    if object_name in b:
+      return True
+    dirs, files = self.list_bucket_contents(bucket, object_name)
+    return bool(dirs or files)
+
   @staticmethod
   def is_gs_url(url):
     """Returns True if url is a legal Google Storage URL ("gs://bucket/file").
     """
     try:
-      if url.lower().startswith(_GS_PREFIX) and len(url) > len(_GS_PREFIX):
-        return url[len(_GS_PREFIX)].isalnum()
+      if url.lower().startswith(GS_PREFIX) and len(url) > len(GS_PREFIX):
+        return url[len(GS_PREFIX)].isalnum()
       else:
         return False
     except AttributeError:
@@ -602,7 +628,7 @@ class GSUtils(object):
     """
     if not GSUtils.is_gs_url(url):
       raise AttributeError('"%s" is not a legal Google Storage URL' % url)
-    prefix_removed = url[len(_GS_PREFIX):]
+    prefix_removed = url[len(GS_PREFIX):]
     pathsep_index = prefix_removed.find('/')
     if pathsep_index < 0:
       return (prefix_removed, '')

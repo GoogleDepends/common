@@ -388,6 +388,17 @@ def _test_dir_upload_and_download():
                      path=posixpath.join(remote_dir, subdir, filename))
 
 
+def _test_does_storage_object_exist():
+  gs = gs_utils.GSUtils()
+  cases = (('gs_utils_manualtest/4843645167453050644/subdir/file1', True),
+           ('gs_utils_manualtest', True),
+           ('bogus', False))
+  for obj, expect in cases:
+    msg = 'expected exists(%s) to be %s' % (
+        '/'.join(('gs:/', TEST_BUCKET, obj)), expect)
+    assert gs.does_storage_object_exist(TEST_BUCKET, obj) == expect, msg
+
+
 if __name__ == '__main__':
   _test_static_methods()
   _test_upload_if_multiple_files()
@@ -395,5 +406,6 @@ if __name__ == '__main__':
   _test_public_read()
   _test_authenticated_round_trip()
   _test_dir_upload_and_download()
+  _test_does_storage_object_exist()
   # TODO(epoger): Add _test_unauthenticated_access() to make sure we raise
   # an exception when we try to access without needed credentials.
