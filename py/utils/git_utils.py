@@ -89,12 +89,6 @@ def GetRemoteMasterHash(git_url):
                           'refs/heads/master']).rstrip()
 
 
-def GetModifiedFiles():
-  """Returns a list of locally modified files within the current working dir.
-  """
-  return shell_utils.run([GIT, 'ls-files', '-m']).splitlines()
-
-
 def GetCurrentBranch():
   return shell_utils.run([GIT, 'rev-parse', '--abbrev-ref', 'HEAD']).rstrip()
 
