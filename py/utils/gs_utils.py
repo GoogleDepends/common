@@ -411,7 +411,7 @@ class GSUtils(object):
     q.join()
 
   def download_file(self, source_bucket, source_path, dest_path,
-                    create_subdirs_if_needed=False):
+                    create_subdirs_if_needed=False, source_generation=None):
     """Downloads a single file from Google Cloud Storage to local disk.
 
     Args:
@@ -420,10 +420,13 @@ class GSUtils(object):
       dest_path: full path (local-OS-style) on local disk to copy the file to
       create_subdirs_if_needed: boolean; whether to create subdirectories as
           needed to create dest_path
+      source_generation: the generation version of the source
     """
     b = self._connect_to_bucket(bucket=source_bucket)
     key = Key(b)
     key.name = source_path
+    if source_generation:
+      key.generation = source_generation
     if create_subdirs_if_needed:
       _makedirs_if_needed(os.path.dirname(dest_path))
     with open(dest_path, 'w') as f:
