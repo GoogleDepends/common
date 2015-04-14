@@ -19,12 +19,14 @@ API/library references:
 # System-level imports
 import errno
 import hashlib
+import math
 import os
 import posixpath
 import Queue
 import re
 import sys
 import threading
+import time
 
 # Imports from third-party code
 TRUNK_DIRECTORY = os.path.abspath(os.path.join(
@@ -386,6 +388,8 @@ class GSUtils(object):
     for rel_path in source_fileset:
       q.put(rel_path)
 
+    err = {}
+
     # Spin up worker threads to read from the task queue.
     def worker():
       while True:
@@ -395,13 +399,25 @@ class GSUtils(object):
           return  # no more tasks in the queue, so exit
         print (' Uploading file %d/%d: %s' % (
             num_files_to_upload - q.qsize(), num_files_to_upload, rel_path))
-        self.upload_file(
-            source_path=os.path.join(source_dir, rel_path),
-            dest_bucket=b,
-            dest_path=posixpath.join(dest_dir, rel_path),
-            upload_if=self.UploadIf.ALWAYS,
-            **kwargs)
-        q.task_done()
+
+        retries = 5
+        for retry in range(retries):
+          try:
+            self.upload_file(
+                source_path=os.path.join(source_dir, rel_path),
+                dest_bucket=b,
+                dest_path=posixpath.join(dest_dir, rel_path),
+                upload_if=self.UploadIf.ALWAYS,
+                **kwargs)
+            q.task_done()
+            break
+          except Exception as error:
+            if retry < retries - 1:
+              print '  Retrying upload, attempt #%d' % retry + 1
+              time.sleep(2 ** retry)
+            else:
+              err[rel_path] = error
+
     for _ in range(num_threads):
       t = threading.Thread(target=worker)
       t.daemon = True
@@ -409,6 +425,12 @@ class GSUtils(object):
 
     # Block until all files have been uploaded and all workers have exited.
     q.join()
+
+    if err:
+      errMsg = 'Failed to upload the following: \n\n'
+      for rel_path, e in err.iteritems():
+        errMsg += '%s: %s\n' % (rel_path, e)
+      raise Exception(errMsg)
 
   def download_file(self, source_bucket, source_path, dest_path,
                     create_subdirs_if_needed=False, source_generation=None):
