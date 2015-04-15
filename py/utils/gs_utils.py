@@ -413,7 +413,7 @@ class GSUtils(object):
             break
           except Exception as error:
             if retry < retries - 1:
-              print '  Retrying upload, attempt #%d' % retry + 1
+              print '  Retrying upload, attempt #%d' % (retry + 1)
               time.sleep(2 ** retry)
             else:
               err[rel_path] = error
