@@ -1,7 +1,7 @@
-# This file is used by gcl to get repository specific information.
-CODE_REVIEW_SERVER: codereview.chromium.org
-VIEW_VC: https://skia.googlesource.com/common/+/
-CC_LIST: reviews@skia.org
+# This file is used by git cl to get repository specific information.
 BUG_PREFIX: skia:
-TRYSERVER_SVN_URL: https://skia-try.googlecode.com/svn
+CC_LIST: reviews@skia.org
+CODE_REVIEW_SERVER: codereview.chromium.org
+GERRIT_HOST: True
 PROJECT: skiacommon
+VIEW_VC: https://skia.googlesource.com/common/+/
